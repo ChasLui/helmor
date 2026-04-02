@@ -19,10 +19,12 @@ import {
 } from "lucide-react";
 import {
   DEFAULT_WORKSPACE_GROUPS,
+  loadArchivedWorkspaces,
   loadWorkspaceGroups,
   type GroupTone,
   type WorkspaceGroup,
   type WorkspaceRow,
+  type WorkspaceSummary,
 } from "../lib/conductor";
 import { cn } from "../lib/utils";
 import { TooltipProvider } from "./ui/tooltip";
@@ -144,6 +146,9 @@ function WorkspaceAvatar({ letter }: { letter: string }) {
 }
 
 function WorkspaceRowItem({ row }: { row: WorkspaceRow }) {
+  const actionLabel =
+    row.state === "archived" ? "Restore workspace" : "Archive workspace";
+
   return (
     <div
       aria-label={row.title}
@@ -165,11 +170,11 @@ function WorkspaceRowItem({ row }: { row: WorkspaceRow }) {
 
       <BaseTooltip
         side="top"
-        content={<span>Archive workspace</span>}
+        content={<span>{actionLabel}</span>}
       >
         <button
           type="button"
-          aria-label="Archive workspace"
+          aria-label={actionLabel}
           className="invisible flex size-6 shrink-0 cursor-pointer items-center justify-center rounded-md text-app-muted hover:bg-app-toolbar-hover hover:text-app-foreground group-hover:visible"
         >
           <Archive className="size-3.5" strokeWidth={1.9} />
@@ -181,29 +186,35 @@ function WorkspaceRowItem({ row }: { row: WorkspaceRow }) {
 
 export function WorkspacesSidebar() {
   const [groups, setGroups] = useState<WorkspaceGroup[]>(DEFAULT_WORKSPACE_GROUPS);
+  const [archivedRows, setArchivedRows] = useState<WorkspaceRow[]>([]);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     done: true,
     review: true,
     progress: true,
     backlog: true,
     canceled: true,
+    archived: false,
   });
 
   useEffect(() => {
     let isDisposed = false;
 
-    void loadWorkspaceGroups().then((loadedGroups) => {
-      if (isDisposed) {
-        return;
-      }
+    void Promise.all([loadWorkspaceGroups(), loadArchivedWorkspaces()]).then(
+      ([loadedGroups, archivedWorkspaces]) => {
+        if (isDisposed) {
+          return;
+        }
 
-      setGroups(loadedGroups);
-      setOpenGroups((current) =>
-        Object.fromEntries(
-          loadedGroups.map((group) => [group.id, current[group.id] ?? true]),
-        ),
-      );
-    });
+        setGroups(loadedGroups);
+        setArchivedRows(archivedWorkspaces.map(summaryToArchivedRow));
+        setOpenGroups((current) => ({
+          ...Object.fromEntries(
+            loadedGroups.map((group) => [group.id, current[group.id] ?? true]),
+          ),
+          archived: current.archived ?? false,
+        }));
+      },
+    );
 
     return () => {
       isDisposed = true;
@@ -250,7 +261,7 @@ export function WorkspacesSidebar() {
 
         <div
           data-slot="workspace-groups-scroll"
-          className="mt-4 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pr-1.5"
+          className="mt-4 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pr-2.5 [scrollbar-gutter:stable]"
         >
           {groups.map((group) => {
             const isOpen = openGroups[group.id];
@@ -299,8 +310,74 @@ export function WorkspacesSidebar() {
               </section>
             );
           })}
+
+          <section aria-label="Archived" className="space-y-1.5">
+            <button
+              type="button"
+              aria-label="Archived"
+              onClick={() => {
+                setOpenGroups((current) => ({
+                  ...current,
+                  archived: !current.archived,
+                }));
+              }}
+              className="group flex w-full cursor-pointer select-none items-center justify-between rounded-xl px-1 py-1 text-[13px] font-semibold tracking-[-0.01em] text-app-foreground hover:bg-app-toolbar-hover/70"
+            >
+              <span className="flex items-center gap-2">
+                <Archive
+                  className="size-[14px] shrink-0 text-app-backlog"
+                  strokeWidth={1.9}
+                />
+                <span>Archived</span>
+              </span>
+
+              <ChevronDown
+                className={cn(
+                  "size-4 shrink-0 text-app-foreground-soft transition-transform",
+                  !openGroups.archived && "-rotate-90",
+                )}
+                strokeWidth={2}
+              />
+            </button>
+
+            {openGroups.archived && archivedRows.length > 0 ? (
+              <div className="space-y-0.5">
+                {archivedRows.map((row) => (
+                  <WorkspaceRowItem key={row.id} row={row} />
+                ))}
+              </div>
+            ) : null}
+          </section>
         </div>
       </div>
     </TooltipProvider>
   );
+}
+
+function summaryToArchivedRow(summary: WorkspaceSummary): WorkspaceRow {
+  const avatar =
+    Array.from(summary.title).find((character) =>
+      /[A-Za-z0-9]/.test(character),
+    )?.toUpperCase() ?? "A";
+
+  return {
+    id: summary.id,
+    title: summary.title,
+    avatar,
+    active: false,
+    directoryName: summary.directoryName,
+    repoName: summary.repoName,
+    state: summary.state,
+    derivedStatus: summary.derivedStatus,
+    manualStatus: summary.manualStatus ?? null,
+    branch: summary.branch ?? null,
+    activeSessionId: summary.activeSessionId ?? null,
+    activeSessionTitle: summary.activeSessionTitle ?? null,
+    activeSessionAgentType: summary.activeSessionAgentType ?? null,
+    activeSessionStatus: summary.activeSessionStatus ?? null,
+    prTitle: summary.prTitle ?? null,
+    sessionCount: summary.sessionCount,
+    messageCount: summary.messageCount,
+    attachmentCount: summary.attachmentCount,
+  };
 }

@@ -24,6 +24,7 @@ const DEFAULT_SIDEBAR_WIDTH = 288;
 const MIN_SIDEBAR_WIDTH = 220;
 const MAX_SIDEBAR_WIDTH = 520;
 const SIDEBAR_RESIZE_STEP = 16;
+const SIDEBAR_RESIZE_HIT_AREA = 20;
 
 function clampSidebarWidth(width: number) {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, width));
@@ -190,7 +191,7 @@ function App() {
     const previousCursor = document.body.style.cursor;
     const previousUserSelect = document.body.style.userSelect;
 
-    document.body.style.cursor = "col-resize";
+    document.body.style.cursor = "ew-resize";
     document.body.style.userSelect = "none";
 
     window.addEventListener("mousemove", handleMouseMove);
@@ -234,36 +235,40 @@ function App() {
       className="relative h-screen overflow-hidden bg-app-base font-sans text-app-foreground antialiased"
       data-theme="volta-dark"
     >
-      <div className="flex h-full min-h-0 bg-app-base">
+      <div className="relative flex h-full min-h-0 bg-app-base">
         <aside
           aria-label="Workspace sidebar"
           className="relative h-full shrink-0 overflow-hidden bg-app-sidebar"
           style={{ width: `${sidebarWidth}px` }}
         >
           <WorkspacesSidebar />
-
-          <div
-            role="separator"
-            tabIndex={0}
-            aria-label="Resize sidebar"
-            aria-orientation="vertical"
-            aria-valuemin={MIN_SIDEBAR_WIDTH}
-            aria-valuemax={MAX_SIDEBAR_WIDTH}
-            aria-valuenow={sidebarWidth}
-            onMouseDown={handleResizeStart}
-            onKeyDown={handleResizeKeyDown}
-            className="group absolute inset-y-0 -right-2 z-30 w-4 cursor-col-resize touch-none outline-none"
-          >
-            <span
-              aria-hidden="true"
-              className={`absolute inset-y-0 left-1/2 -translate-x-1/2 transition-[width,background-color,box-shadow] ${
-                isResizing
-                  ? "w-[2px] bg-white shadow-[0_0_12px_rgba(255,255,255,0.38)]"
-                  : "w-px bg-app-border group-hover:w-[2px] group-hover:bg-app-foreground-soft/75 group-hover:shadow-[0_0_10px_rgba(255,255,255,0.14)] group-focus-visible:w-[2px] group-focus-visible:bg-app-foreground-soft/75"
-              }`}
-            />
-          </div>
         </aside>
+
+        <div
+          role="separator"
+          tabIndex={0}
+          aria-label="Resize sidebar"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_SIDEBAR_WIDTH}
+          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          aria-valuenow={sidebarWidth}
+          onMouseDown={handleResizeStart}
+          onKeyDown={handleResizeKeyDown}
+          className="group absolute inset-y-0 z-30 cursor-ew-resize touch-none outline-none"
+          style={{
+            left: `${sidebarWidth - SIDEBAR_RESIZE_HIT_AREA / 2}px`,
+            width: `${SIDEBAR_RESIZE_HIT_AREA}px`,
+          }}
+        >
+          <span
+            aria-hidden="true"
+            className={`pointer-events-none absolute inset-y-0 left-1/2 -translate-x-1/2 transition-[width,background-color,box-shadow] ${
+              isResizing
+                ? "w-[2px] bg-white shadow-[0_0_12px_rgba(255,255,255,0.38)]"
+                : "w-px bg-app-border group-hover:w-[2px] group-hover:bg-app-foreground-soft/75 group-hover:shadow-[0_0_10px_rgba(255,255,255,0.14)] group-focus-visible:w-[2px] group-focus-visible:bg-app-foreground-soft/75"
+            }`}
+          />
+        </div>
 
         <section
           aria-label="Workspace panel"

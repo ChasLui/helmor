@@ -35,6 +35,26 @@ export type ConductorFixtureInfo = {
   archiveRoot: string;
 };
 
+export type WorkspaceSummary = {
+  id: string;
+  title: string;
+  directoryName: string;
+  repoName: string;
+  state: string;
+  derivedStatus: string;
+  manualStatus?: string | null;
+  active: boolean;
+  branch?: string | null;
+  activeSessionId?: string | null;
+  activeSessionTitle?: string | null;
+  activeSessionAgentType?: string | null;
+  activeSessionStatus?: string | null;
+  prTitle?: string | null;
+  sessionCount?: number;
+  messageCount?: number;
+  attachmentCount?: number;
+};
+
 const DEFAULT_WORKSPACE_GROUPS: WorkspaceGroup[] = [
   {
     id: "done",
@@ -127,6 +147,36 @@ const DEFAULT_WORKSPACE_GROUPS: WorkspaceGroup[] = [
   },
 ];
 
+const DEFAULT_ARCHIVED_WORKSPACES: WorkspaceSummary[] = [
+  {
+    id: "archived-coda-publish",
+    title: "feat: add Coda publish function...",
+    directoryName: "coda-publish",
+    repoName: "sample",
+    state: "archived",
+    derivedStatus: "done",
+    active: false,
+  },
+  {
+    id: "archived-marketing-site",
+    title: "Implement new marketing site ...",
+    directoryName: "marketing-site",
+    repoName: "sample",
+    state: "archived",
+    derivedStatus: "review",
+    active: false,
+  },
+  {
+    id: "archived-gitlab-publish",
+    title: "feat: add GitLab publish suppor...",
+    directoryName: "gitlab-publish",
+    repoName: "sample",
+    state: "archived",
+    derivedStatus: "review",
+    active: false,
+  },
+];
+
 type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 
 async function getTauriInvoke(): Promise<TauriInvoke | null> {
@@ -163,6 +213,20 @@ export async function loadFixtureInfo(): Promise<ConductorFixtureInfo | null> {
     return await invoke<ConductorFixtureInfo>("get_conductor_fixture_info");
   } catch {
     return null;
+  }
+}
+
+export async function loadArchivedWorkspaces(): Promise<WorkspaceSummary[]> {
+  const invoke = await getTauriInvoke();
+
+  if (!invoke) {
+    return DEFAULT_ARCHIVED_WORKSPACES;
+  }
+
+  try {
+    return await invoke<WorkspaceSummary[]>("list_archived_workspaces");
+  } catch {
+    return DEFAULT_ARCHIVED_WORKSPACES;
   }
 }
 

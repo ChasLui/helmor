@@ -100,7 +100,7 @@ describe("App", () => {
     fireEvent.mouseDown(resizeHandle, { clientX: 288 });
 
     await waitFor(() => {
-      expect(document.body.style.cursor).toBe("col-resize");
+      expect(document.body.style.cursor).toBe("ew-resize");
     });
 
     fireEvent.mouseMove(window, { clientX: 360 });
