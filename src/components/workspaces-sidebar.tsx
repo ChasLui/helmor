@@ -212,7 +212,7 @@ export function WorkspacesSidebar() {
 
   return (
     <TooltipProvider>
-      <div className="flex h-full min-h-screen flex-col pb-4">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden pb-4">
         <div
           data-slot="window-safe-top"
           className="flex h-11 shrink-0 items-center pr-3"
@@ -248,7 +248,10 @@ export function WorkspacesSidebar() {
           </div>
         </div>
 
-        <div className="mt-4 flex flex-col gap-4 px-2">
+        <div
+          data-slot="workspace-groups-scroll"
+          className="mt-4 flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 pb-3 pr-1.5"
+        >
           {groups.map((group) => {
             const isOpen = openGroups[group.id];
             const canCollapse = group.rows.length > 0;

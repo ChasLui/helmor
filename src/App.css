@@ -118,6 +118,8 @@
   --color-app-accent-cyan: var(--color-info-400);
   --color-app-accent-pink: var(--color-important-400);
   --color-app-warm: var(--color-warning-500);
+  --color-app-scrollbar-thumb: oklch(78% 0.01 286 / 0.28);
+  --color-app-scrollbar-thumb-hover: oklch(84% 0.012 286 / 0.42);
 }
 
 :root {
@@ -133,10 +135,43 @@ html,
 body,
 #root {
   margin: 0;
+  height: 100%;
   min-height: 100%;
+  overflow: hidden;
 }
 
 body {
   min-height: 100vh;
   background-color: var(--color-app-base);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-app-scrollbar-thumb) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+  background: transparent;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: var(--color-app-scrollbar-thumb);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-app-scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }

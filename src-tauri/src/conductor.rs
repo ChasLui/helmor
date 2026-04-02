@@ -107,7 +107,10 @@ pub fn get_conductor_fixture_info() -> Result<ConductorFixtureInfo, String> {
 
 #[tauri::command]
 pub fn list_workspace_groups() -> Result<Vec<WorkspaceSidebarGroup>, String> {
-    let records = load_workspace_records()?;
+    let records = load_workspace_records()?
+        .into_iter()
+        .filter(|record| record.state != "archived")
+        .collect::<Vec<_>>();
     let mut done = Vec::new();
     let mut review = Vec::new();
     let mut progress = Vec::new();

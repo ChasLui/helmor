@@ -46,10 +46,16 @@ describe("App", () => {
     });
     const safeAreas = container.querySelectorAll('[data-slot="window-safe-top"]');
     const avatars = container.querySelectorAll('[data-slot="workspace-avatar"]');
+    const groupsScrollRegion = container.querySelector(
+      '[data-slot="workspace-groups-scroll"]',
+    );
 
     expect(shell).toHaveAttribute("data-theme", "volta-dark");
     expect(shell).toHaveClass("bg-app-base");
+    expect(shell).toHaveClass("h-screen");
+    expect(shell).toHaveClass("overflow-hidden");
     expect(sidebar).toHaveClass("bg-app-sidebar");
+    expect(sidebar).toHaveClass("overflow-hidden");
     expect(sidebar).toHaveStyle({ width: "288px" });
     expect(panel).toHaveClass("relative");
     expect(panel).toHaveClass("bg-app-elevated");
@@ -63,6 +69,8 @@ describe("App", () => {
     expect(resizeHandle).toHaveAttribute("aria-valuenow", "288");
     expect(safeAreas).toHaveLength(1);
     expect(avatars).toHaveLength(11);
+    expect(groupsScrollRegion).toHaveClass("overflow-y-auto");
+    expect(groupsScrollRegion).toHaveClass("flex-1");
     expect(screen.getByText("Workspaces")).toBeInTheDocument();
     expect(doneGroup).toBeInTheDocument();
     expect(progressGroup).toBeInTheDocument();

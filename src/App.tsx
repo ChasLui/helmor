@@ -231,13 +231,13 @@ function App() {
   return (
     <main
       aria-label="Application shell"
-      className="relative min-h-screen overflow-hidden bg-app-base font-sans text-app-foreground antialiased"
+      className="relative h-screen overflow-hidden bg-app-base font-sans text-app-foreground antialiased"
       data-theme="volta-dark"
     >
-      <div className="flex min-h-screen bg-app-base">
+      <div className="flex h-full min-h-0 bg-app-base">
         <aside
           aria-label="Workspace sidebar"
-          className="relative shrink-0 bg-app-sidebar"
+          className="relative h-full shrink-0 overflow-hidden bg-app-sidebar"
           style={{ width: `${sidebarWidth}px` }}
         >
           <WorkspacesSidebar />
@@ -267,7 +267,7 @@ function App() {
 
         <section
           aria-label="Workspace panel"
-          className="relative flex min-h-screen flex-1 flex-col bg-app-elevated"
+          className="relative flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-app-elevated"
         >
           <div
             aria-label="Workspace panel drag region"
