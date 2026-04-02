@@ -1,11 +1,30 @@
+@import "@fontsource-variable/geist";
 @import "tailwindcss";
 
+@theme {
+  --font-sans:
+    "Geist Variable", "SF Pro Display", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --color-app-base: #13111c;
+  --color-app-canvas: #13111c;
+  --color-app-elevated: #0b0910;
+  --color-app-sidebar: #15141a;
+  --color-app-sidebar-strong: #19181f;
+  --color-app-overlay: #13111c80;
+  --color-app-border: #ffffff14;
+  --color-app-border-strong: #ffffff26;
+  --color-app-foreground: #f9f3e9;
+  --color-app-foreground-soft: #d9d9d9;
+  --color-app-muted: #a0a0a0;
+  --color-app-accent: #5024cc;
+  --color-app-accent-strong: #7b0cd0;
+  --color-app-accent-cyan: #00ebff;
+  --color-app-accent-pink: #ff3194;
+  --color-app-accent-warm: #d97757;
+}
+
 :root {
-  --app-background: hsl(0 0% 4%);
-  --app-canvas: hsl(0 0% 0%);
-  --app-foreground: hsl(0 0% 93%);
-  color: var(--app-foreground);
-  background-color: var(--app-background);
+  color-scheme: dark;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -22,5 +41,5 @@ body,
 
 body {
   min-height: 100vh;
-  background-color: var(--app-background);
+  background-color: var(--color-app-base);
 }
