@@ -329,7 +329,10 @@ export function WorkspacesSidebar() {
                       [group.id]: !current[group.id],
                     }));
                   }}
-                  className="flex w-full items-center justify-between rounded-xl px-1 py-1 text-[13px] font-semibold tracking-[-0.01em] text-app-foreground hover:bg-app-toolbar-hover/70"
+                  className={cn(
+                    "group flex w-full items-center justify-between rounded-xl px-1 py-1 text-[13px] font-semibold tracking-[-0.01em] text-app-foreground hover:bg-app-toolbar-hover/70",
+                    canCollapse ? "cursor-pointer" : "cursor-default",
+                  )}
                 >
                   <span className="flex items-center gap-2">
                     <GroupIcon tone={group.tone} />
