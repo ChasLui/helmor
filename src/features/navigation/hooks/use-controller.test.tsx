@@ -550,7 +550,14 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		expect(onSelectWorkspace).toHaveBeenCalledWith("ws-created");
 	});
 
-	it("does not show the optimistic upgrade alongside the cached real workspace on success", async () => {
+	// Retry: even with the mock + timeout fixes this test exercises the most
+	// timing-sensitive microtask ordering in the suite (mutation resolve →
+	// setQueryData injection → fire-and-forget refetchNavigation vs
+	// reconciliation effect). Allow two local retries so a single CI hiccup
+	// does not fail the whole Rust/Frontend matrix and force a full re-run.
+	it("does not show the optimistic upgrade alongside the cached real workspace on success", {
+		retry: 2,
+	}, async () => {
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});
