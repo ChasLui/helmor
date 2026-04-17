@@ -375,7 +375,7 @@ function ScriptsSection({
 					placeholder="e.g., npm install"
 					value={setupScript}
 					locked={setupLocked}
-					lockedMessage="来自当前 workspace 的 helmor.json，无法在此编辑"
+					lockedMessage="Set by this workspace's helmor.json — edit it there"
 					onChange={handleSetupChange}
 				/>
 				<ScriptField
@@ -384,7 +384,7 @@ function ScriptsSection({
 					placeholder="e.g., npm run dev"
 					value={runScript}
 					locked={runLocked}
-					lockedMessage="来自当前 workspace 的 helmor.json，无法在此编辑"
+					lockedMessage="Set by this workspace's helmor.json — edit it there"
 					onChange={handleRunChange}
 				/>
 				<ScriptField
@@ -393,7 +393,7 @@ function ScriptsSection({
 					placeholder="e.g., docker compose down"
 					value={archiveScript}
 					locked={archiveLocked}
-					lockedMessage="来自当前 workspace 的 helmor.json，无法在此编辑"
+					lockedMessage="Set by this workspace's helmor.json — edit it there"
 					onChange={handleArchiveChange}
 				/>
 			</div>

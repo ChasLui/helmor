@@ -274,7 +274,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		vi.clearAllMocks();
 	});
 
-	it("preflight 成功后立即乐观移动 workspace，并切到下一个 workspace", async () => {
+	it("optimistically moves the workspace after preflight success and switches to the next one", async () => {
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});
@@ -315,7 +315,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		expect(pushWorkspaceToast).not.toHaveBeenCalled();
 	});
 
-	it("连续 archive 时会按当前 sidebar 位置向下顺延，而不是跳到 archived", async () => {
+	it("consecutive archives advance to the next sidebar row instead of jumping to archived", async () => {
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});
@@ -391,7 +391,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		expect(pushWorkspaceToast).not.toHaveBeenCalled();
 	});
 
-	it("创建 workspace 时先插入 initializing 占位项，再切到真实 workspace", async () => {
+	it("inserts an initializing placeholder while creating a workspace, then swaps to the real one", async () => {
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});
@@ -466,7 +466,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		expect(pushWorkspaceToast).not.toHaveBeenCalled();
 	});
 
-	it("创建成功后会直接把 optimistic row 升级成真实 workspace，避免 sidebar 真空期", async () => {
+	it("upgrades the optimistic row to the real workspace on success so the sidebar never goes empty", async () => {
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});
@@ -550,7 +550,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		expect(onSelectWorkspace).toHaveBeenCalledWith("ws-created");
 	});
 
-	it("创建成功时如果真实 workspace 已经进了 cache，也不会和 optimistic 升级项并存", async () => {
+	it("does not show the optimistic upgrade alongside the cached real workspace on success", async () => {
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});
@@ -641,7 +641,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		});
 	});
 
-	it("后台启动立即失败时会回滚乐观更新", async () => {
+	it("rolls back the optimistic update when the background start fails immediately", async () => {
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});
@@ -679,7 +679,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		expect(pushWorkspaceToast).toHaveBeenCalled();
 	});
 
-	it("后台未完成时，stale refetch 不会把 workspace 拉回 live 列表；失败事件会回滚", async () => {
+	it("stale refetches do not restore the workspace while the background is pending; failure events roll it back", async () => {
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});
@@ -752,7 +752,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		});
 	});
 
-	it("成功事件后，后续服务端刷新会以真实 archived 数据为准", async () => {
+	it("after a success event, subsequent server refreshes defer to the real archived data", async () => {
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});
@@ -818,7 +818,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		});
 	});
 
-	it("成功事件先到、服务端快照未切换时，也不会把同一 workspace 同时渲染到 live 和 archived", async () => {
+	it("does not render the same workspace in both live and archived when the success event arrives before the server snapshot switches", async () => {
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});
@@ -884,7 +884,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		});
 	});
 
-	it("删除 archived placeholder 时会同步清掉本地 optimistic rollback 项", async () => {
+	it("deleting an archived placeholder also clears the local optimistic rollback entry", async () => {
 		const queryClient = new QueryClient({
 			defaultOptions: { queries: { retry: false } },
 		});

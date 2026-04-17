@@ -1083,18 +1083,18 @@ working_directory: /tmp/helmor
     #[test]
     fn convert_answers_maps_to_codex_format() {
         let content = serde_json::json!({
-            "project_shape": "新项目",
-            "app_goal": "验证需求",
+            "project_shape": "New project",
+            "app_goal": "Validate requirements",
         });
         let answers = convert_elicitation_content_to_codex_answers(&content);
         let obj = answers.as_object().unwrap();
         assert_eq!(
             obj["project_shape"],
-            serde_json::json!({ "answers": ["新项目"] }),
+            serde_json::json!({ "answers": ["New project"] }),
         );
         assert_eq!(
             obj["app_goal"],
-            serde_json::json!({ "answers": ["验证需求"] }),
+            serde_json::json!({ "answers": ["Validate requirements"] }),
         );
     }
 
@@ -1123,39 +1123,39 @@ working_directory: /tmp/helmor
     fn user_input_schema_with_options() {
         let questions = serde_json::json!([{
             "id": "project_shape",
-            "header": "项目形态",
-            "question": "选择项目类型",
+            "header": "Project shape",
+            "question": "Choose project type",
             "isOther": false,
             "options": [
-                { "label": "新项目", "description": "从零开始" },
-                { "label": "改造", "description": "基于现有代码" },
+                { "label": "New project", "description": "Start from scratch" },
+                { "label": "Refactor", "description": "Based on existing code" },
             ]
         }]);
         let schema = build_user_input_schema(&questions);
         // Key should be the question id
         let field = &schema["properties"]["project_shape"];
-        assert_eq!(field["title"], "项目形态");
-        assert_eq!(field["description"], "选择项目类型");
+        assert_eq!(field["title"], "Project shape");
+        assert_eq!(field["description"], "Choose project type");
         let opts = field["oneOf"].as_array().unwrap();
         assert_eq!(opts.len(), 2);
-        assert_eq!(opts[0]["const"], "新项目");
-        assert_eq!(opts[0]["description"], "从零开始");
+        assert_eq!(opts[0]["const"], "New project");
+        assert_eq!(opts[0]["description"], "Start from scratch");
         assert!(field.get("x-allow-other").is_none());
     }
 
     #[test]
     fn user_input_schema_options_with_is_other() {
         let questions = serde_json::json!([{
-            "header": "终端选择",
-            "question": "首发终端？",
+            "header": "Platform choice",
+            "question": "First-launch platform?",
             "isOther": true,
             "options": [
-                { "label": "H5", "description": "最快" },
+                { "label": "H5", "description": "Fastest" },
             ]
         }]);
         let schema = build_user_input_schema(&questions);
         let q0 = &schema["properties"]["q0"];
-        assert_eq!(q0["title"], "终端选择");
+        assert_eq!(q0["title"], "Platform choice");
         assert_eq!(q0["x-allow-other"], true);
         assert_eq!(q0["oneOf"].as_array().unwrap().len(), 1);
     }
