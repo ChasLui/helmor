@@ -401,6 +401,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 			| ((value: {
 					createdWorkspaceId: string;
 					selectedWorkspaceId: string;
+					initialSessionId: string;
 					createdState: string;
 					directoryName: string;
 					branch: string;
@@ -451,6 +452,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 			resolveCreate?.({
 				createdWorkspaceId: "ws-created",
 				selectedWorkspaceId: "ws-created",
+				initialSessionId: "session-created",
 				createdState: "ready",
 				directoryName: "vega",
 				branch: "feature/vega",
@@ -475,6 +477,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 			| ((value: {
 					createdWorkspaceId: string;
 					selectedWorkspaceId: string;
+					initialSessionId: string;
 					createdState: string;
 					directoryName: string;
 					branch: string;
@@ -527,6 +530,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 			resolveCreate?.({
 				createdWorkspaceId: "ws-created",
 				selectedWorkspaceId: "ws-created",
+				initialSessionId: "session-created",
 				createdState: "initializing",
 				directoryName: "testuser-helmor",
 				branch: "testuser/helmor",
@@ -546,8 +550,56 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		});
 		expect(
 			queryClient.getQueryData(helmorQueryKeys.workspaceSessions("ws-created")),
-		).toEqual([]);
+		).toMatchObject([
+			{
+				id: "session-created",
+				workspaceId: "ws-created",
+				active: true,
+			},
+		]);
 		expect(onSelectWorkspace).toHaveBeenCalledWith("ws-created");
+	});
+
+	it("does not optimistically reorder sidebar groups when setting manual status", async () => {
+		const queryClient = new QueryClient({
+			defaultOptions: { queries: { retry: false } },
+		});
+		const deferred = new Promise<void>(() => {});
+
+		apiMocks.setWorkspaceManualStatus.mockReturnValue(deferred);
+
+		const { result } = renderHook(
+			() =>
+				useWorkspacesSidebarController({
+					selectedWorkspaceId: "ws-1",
+					onSelectWorkspace: vi.fn(),
+					pushWorkspaceToast: vi.fn(),
+				}),
+			{ wrapper: createWrapper(queryClient) },
+		);
+
+		await waitFor(() => {
+			expect(result.current.groups[0]?.rows.map((row) => row.id)).toEqual([
+				"ws-1",
+				"ws-2",
+			]);
+		});
+
+		act(() => {
+			void result.current.handleSetManualStatus("ws-1", "done");
+		});
+
+		expect(apiMocks.setWorkspaceManualStatus).toHaveBeenCalledWith(
+			"ws-1",
+			"done",
+		);
+		expect(result.current.groups[0]?.rows.map((row) => row.id)).toEqual([
+			"ws-1",
+			"ws-2",
+		]);
+		expect(
+			result.current.groups.find((group) => group.id === "done")?.rows ?? [],
+		).toEqual([]);
 	});
 
 	// Retry: even with the mock + timeout fixes this test exercises the most
@@ -565,6 +617,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 			| ((value: {
 					createdWorkspaceId: string;
 					selectedWorkspaceId: string;
+					initialSessionId: string;
 					createdState: string;
 					directoryName: string;
 					branch: string;
@@ -643,6 +696,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 			resolveCreate?.({
 				createdWorkspaceId: "ws-created",
 				selectedWorkspaceId: "ws-created",
+				initialSessionId: "session-created",
 				createdState: "initializing",
 				directoryName: "testuser-helmor",
 				branch: "testuser/helmor",

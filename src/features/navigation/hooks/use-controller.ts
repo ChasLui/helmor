@@ -753,41 +753,6 @@ export function useWorkspacesSidebarController({
 
 	const handleSetManualStatus = useCallback(
 		async (workspaceId: string, status: string | null) => {
-			const targetGroupId = workspaceGroupIdFromStatus(status, status);
-
-			queryClient.setQueryData(helmorQueryKeys.workspaceGroups, (current) => {
-				if (!Array.isArray(current)) {
-					return current;
-				}
-				const groupsCopy = current as typeof groups;
-
-				let movedRow: (typeof groups)[number]["rows"][number] | null = null;
-				const withoutRow = groupsCopy.map((group) => {
-					const index = group.rows.findIndex((row) => row.id === workspaceId);
-					if (index === -1) {
-						return group;
-					}
-					movedRow = { ...group.rows[index], manualStatus: status };
-					return {
-						...group,
-						rows: [
-							...group.rows.slice(0, index),
-							...group.rows.slice(index + 1),
-						],
-					};
-				});
-
-				if (!movedRow) {
-					return current;
-				}
-
-				return withoutRow.map((group) =>
-					group.id === targetGroupId
-						? { ...group, rows: [movedRow, ...group.rows] }
-						: group,
-				);
-			});
-
 			try {
 				await setWorkspaceManualStatus(workspaceId, status);
 				await invalidateWorkspaceSummary(workspaceId);
@@ -820,9 +785,15 @@ export function useWorkspacesSidebarController({
 			}
 
 			const optimisticWorkspaceId = createOptimisticCreatingWorkspaceId(repoId);
+			const optimisticSessionId = `${optimisticWorkspaceId}:initial-session`;
 			const optimisticRow = createOptimisticWorkspaceRow(
 				repository,
 				optimisticWorkspaceId,
+			);
+			const optimisticSession = createOptimisticWorkspaceSession(
+				optimisticWorkspaceId,
+				optimisticSessionId,
+				new Date().toISOString(),
 			);
 			const previousGroups = queryClient.getQueryData<WorkspaceGroup[]>(
 				helmorQueryKeys.workspaceGroups,
@@ -844,11 +815,15 @@ export function useWorkspacesSidebarController({
 
 			queryClient.setQueryData<WorkspaceDetail | null>(
 				helmorQueryKeys.workspaceDetail(optimisticWorkspaceId),
-				createOptimisticCreatingWorkspaceDetail(optimisticRow, repoId),
+				createOptimisticCreatingWorkspaceDetail(
+					optimisticRow,
+					repoId,
+					optimisticSessionId,
+				),
 			);
 			queryClient.setQueryData<WorkspaceSessionSummary[]>(
 				helmorQueryKeys.workspaceSessions(optimisticWorkspaceId),
-				[],
+				[optimisticSession],
 			);
 
 			setCreatingWorkspaceRepoId(repoId);
@@ -884,11 +859,19 @@ export function useWorkspacesSidebarController({
 						createOptimisticResolvedWorkspaceDetail(
 							resolvedOptimisticRow,
 							repoId,
+							response.initialSessionId,
 						),
 				);
 				queryClient.setQueryData<WorkspaceSessionSummary[]>(
 					helmorQueryKeys.workspaceSessions(response.selectedWorkspaceId),
-					(current) => current ?? [],
+					(current) =>
+						current ?? [
+							createOptimisticWorkspaceSession(
+								response.selectedWorkspaceId,
+								response.initialSessionId,
+								optimisticSession.createdAt,
+							),
+						],
 				);
 				queryClient.removeQueries({
 					queryKey: helmorQueryKeys.workspaceDetail(optimisticWorkspaceId),
@@ -1475,6 +1458,38 @@ function createOptimisticWorkspaceRow(
 	};
 }
 
+function createOptimisticWorkspaceSession(
+	workspaceId: string,
+	sessionId: string,
+	createdAt: string,
+): WorkspaceSessionSummary {
+	return {
+		id: sessionId,
+		workspaceId,
+		title: "Untitled",
+		agentType: null,
+		status: "idle",
+		model: null,
+		permissionMode: "default",
+		providerSessionId: null,
+		effortLevel: null,
+		unreadCount: 0,
+		contextTokenCount: 0,
+		contextUsedPercent: null,
+		thinkingEnabled: true,
+		fastMode: false,
+		agentPersonality: null,
+		createdAt,
+		updatedAt: createdAt,
+		lastUserMessageAt: null,
+		resumeSessionAt: null,
+		isHidden: false,
+		isCompacting: false,
+		actionKind: null,
+		active: true,
+	};
+}
+
 function createResolvedWorkspaceRow(
 	row: WorkspaceRow,
 	response: {
@@ -1497,9 +1512,10 @@ function createResolvedWorkspaceRow(
 function createOptimisticResolvedWorkspaceDetail(
 	row: WorkspaceRow,
 	repoId: string,
+	initialSessionId: string,
 ): WorkspaceDetail {
 	return {
-		...createOptimisticCreatingWorkspaceDetail(row, repoId),
+		...createOptimisticCreatingWorkspaceDetail(row, repoId, initialSessionId),
 		id: row.id,
 		title: row.title,
 		directoryName: row.directoryName ?? row.id,
