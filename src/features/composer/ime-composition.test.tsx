@@ -187,4 +187,50 @@ describe("WorkspaceComposer — CJK IME composition", () => {
 			expect(handleSubmit).toHaveBeenCalled();
 		});
 	});
+
+	// Regression guard for the upcoming IME fix in submit-plugin.tsx.
+	//
+	// The fix is one branch — `if (event?.isComposing || event?.keyCode === 229)
+	// return false;` — but the dangerous shape of regression isn't getting that
+	// branch wrong, it's a "sticky" suppression: a future refactor that tracks
+	// composition state across events (e.g. a useRef set on `compositionend`
+	// that nobody clears, or a stale closure that latches `isComposing`) would
+	// silently kill submission for every CJK user, who finishes an IME cycle
+	// every single message they send. That's strictly worse than the original
+	// bug — instead of accidentally submitting, they can never submit at all.
+	//
+	// This test exercises the exact post-composition state: a full IME cycle
+	// has completed (compositionstart -> update -> end), and the next Enter
+	// arrives with `isComposing === false`. It MUST submit. Today this is
+	// green; after the fix it must stay green.
+	it("regression: a normal Enter still submits after a completed IME composition cycle", async () => {
+		const handleSubmit = vi.fn();
+		renderComposer({ onSubmit: handleSubmit });
+
+		await waitFor(() => {
+			expect(screen.getByLabelText("Send")).toBeEnabled();
+		});
+
+		const editor = screen.getByLabelText("Workspace input");
+
+		// User types pinyin "nihao" with the IME and confirms the candidate
+		// "你好" via mouse-click (NOT Enter), so the composition cycle ends
+		// cleanly with no Enter keydown attached. This is the realistic state
+		// we land in right before the user presses Enter to actually send.
+		fireEvent.compositionStart(editor, { data: "" });
+		fireEvent.compositionUpdate(editor, { data: "nihao" });
+		fireEvent.compositionEnd(editor, { data: "你好" });
+
+		fireEvent.keyDown(editor, {
+			key: "Enter",
+			code: "Enter",
+			keyCode: 13,
+			isComposing: false,
+			bubbles: true,
+		});
+
+		await waitFor(() => {
+			expect(handleSubmit).toHaveBeenCalledTimes(1);
+		});
+	});
 });
