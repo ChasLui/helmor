@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3
+
+### Patch Changes
+
+- [#94](https://github.com/dohooo/helmor/pull/94) [`0ec4401`](https://github.com/dohooo/helmor/commit/0ec4401ef86172b73cf8498dc4960f073944bfa0) Thanks [@dohooo](https://github.com/dohooo)! - - Fix Chinese / Japanese / Korean IME pressing Enter to confirm a candidate accidentally sending the message.
+  - Fix Chinese IME segmentation spaces leaking into the composer when switching input method mid-composition (e.g. typing `helmor` no longer becomes `he lmor`).
+
 ## 0.1.2
 
 ### Patch Changes
