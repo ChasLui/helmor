@@ -692,6 +692,9 @@ function AppShell({
 			const effective = resolveTheme(appSettings.theme);
 			document.documentElement.classList.toggle("dark", effective === "dark");
 			document.documentElement.style.colorScheme = effective;
+			void import("@/lib/monaco-runtime").then(({ applyMonacoTheme }) => {
+				applyMonacoTheme(effective);
+			});
 		};
 
 		apply();
