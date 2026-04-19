@@ -62,8 +62,6 @@ import {
 	type ConductorWorkspace,
 	createSession,
 	type DerivedStatus,
-	type DetectedEditor,
-	detectInstalledEditors,
 	drainPendingCliSends,
 	isConductorAvailable,
 	listConductorRepos,
@@ -87,6 +85,7 @@ import { isPathWithinRoot } from "./lib/editor-session";
 import {
 	archivedWorkspacesQueryOptions,
 	createHelmorQueryClient,
+	detectedEditorsQueryOptions,
 	helmorQueryKeys,
 	helmorQueryPersister,
 	sessionThreadMessagesQueryOptions,
@@ -445,9 +444,8 @@ function AppShell({
 	useAppUpdater();
 	useEnsureDefaultModel();
 	const notify = useOsNotifications(appSettings);
-	const [installedEditors, setInstalledEditors] = useState<DetectedEditor[]>(
-		[],
-	);
+	const installedEditorsQuery = useQuery(detectedEditorsQueryOptions());
+	const installedEditors = installedEditorsQuery.data ?? [];
 	const [preferredEditorId, setPreferredEditorId] = useState<string | null>(
 		() => localStorage.getItem(PREFERRED_EDITOR_STORAGE_KEY),
 	);
@@ -631,10 +629,6 @@ function AppShell({
 		setDisplayedSessionId(null);
 		setWorkspaceViewMode("conversation");
 		setEditorSession(null);
-	}, []);
-
-	useEffect(() => {
-		void detectInstalledEditors().then(setInstalledEditors);
 	}, []);
 
 	useEffect(() => {
