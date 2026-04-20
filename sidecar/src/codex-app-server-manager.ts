@@ -451,9 +451,12 @@ export class CodexAppServerManager implements SessionManager {
 			await server.sendRequest("initialize", HELMOR_CLIENT_INFO);
 			server.writeNotification("initialized");
 
+			// 20s — mirrors the Claude sidecar slash-command timeout so both
+			// providers fail the same way when their CLI is missing/slow.
 			const result = await server.sendRequest<Record<string, unknown>>(
 				"skills/list",
 				{ cwds: [cwd] },
+				20_000,
 			);
 
 			return parseSkillsResponse(result, cwd);

@@ -22,7 +22,6 @@ export interface SendMessageParams {
 
 export interface ListSlashCommandsParams {
 	readonly cwd: string | undefined;
-	readonly model: string | undefined;
 }
 
 /**

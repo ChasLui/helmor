@@ -350,7 +350,7 @@ describe("WorkspaceComposerContainer", () => {
 			expect(apiMockState.listSlashCommands).toHaveBeenCalledWith({
 				provider: "claude",
 				workingDirectory: "/tmp/helmor",
-				modelId: "opus-1m",
+				repoId: "repo-1",
 			}),
 		);
 	});
