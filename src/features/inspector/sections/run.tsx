@@ -22,8 +22,6 @@ type RunTabProps = {
 	workspaceId: string | null;
 	runScript: string | null;
 	isActive: boolean;
-	pendingRun?: boolean;
-	onPendingRunHandled?: () => void;
 	onOpenSettings: () => void;
 };
 
@@ -32,8 +30,6 @@ export function RunTab({
 	workspaceId,
 	runScript,
 	isActive,
-	pendingRun,
-	onPendingRunHandled,
 	onOpenSettings,
 }: RunTabProps) {
 	const termRef = useRef<TerminalHandle | null>(null);
@@ -46,6 +42,13 @@ export function RunTab({
 		const existing = attach(workspaceId, "run", {
 			onChunk: (data) => termRef.current?.write(data),
 			onStatusChange: setStatus,
+			// When a fresh run is triggered externally (e.g. Cmd+R while this
+			// tab is mounted), wipe the terminal so old output doesn't bleed
+			// into the new run's stream.
+			onReset: () => {
+				termRef.current?.clear();
+				setHasRun(true);
+			},
 		});
 
 		if (existing) {
@@ -99,14 +102,6 @@ export function RunTab({
 		},
 		[repoId, workspaceId],
 	);
-
-	// Handle pending run request from Cmd+R shortcut.
-	useEffect(() => {
-		if (pendingRun && isActive && repoId && runScript?.trim()) {
-			onPendingRunHandled?.();
-			handleRun();
-		}
-	}, [pendingRun, isActive, repoId, runScript, handleRun, onPendingRunHandled]);
 
 	const hasScript = !!runScript?.trim();
 
