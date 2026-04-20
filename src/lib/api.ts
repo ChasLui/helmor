@@ -672,20 +672,33 @@ export type SlashCommandsResponse = {
 export async function listSlashCommands(input: {
 	provider: AgentProvider;
 	workingDirectory?: string | null;
-	modelId?: string | null;
+	repoId?: string | null;
 }): Promise<SlashCommandsResponse> {
 	try {
 		return await invoke<SlashCommandsResponse>("list_slash_commands", {
 			request: {
 				provider: input.provider,
 				workingDirectory: input.workingDirectory ?? null,
-				modelId: input.modelId ?? null,
+				repoId: input.repoId ?? null,
 			},
 		});
 	} catch (error) {
 		throw new Error(
 			describeInvokeError(error, "Unable to load slash commands."),
 		);
+	}
+}
+
+/** Fire-and-forget: prewarm the backend slash-command cache for a workspace. */
+export async function prewarmSlashCommandsForWorkspace(
+	workspaceId: string,
+): Promise<void> {
+	try {
+		await invoke<void>("prewarm_slash_commands_for_workspace", {
+			workspaceId,
+		});
+	} catch {
+		// Best-effort; cache will still be populated lazily on first /.
 	}
 }
 

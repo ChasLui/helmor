@@ -358,7 +358,7 @@ export const WorkspaceComposerContainer = memo(
 			...slashCommandsQueryOptions(
 				slashProvider,
 				workingDirectory,
-				selectedModelId,
+				workspaceDetailQuery.data?.repoId ?? null,
 			),
 			enabled: Boolean(workingDirectory),
 		});

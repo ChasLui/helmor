@@ -49,7 +49,7 @@ import {
  * unresponsive `claude-code` binary parks the request forever and the popup
  * spinner never resolves.
  */
-const SLASH_COMMANDS_TIMEOUT_MS = 8_000;
+const SLASH_COMMANDS_TIMEOUT_MS = 20_000;
 
 /**
  * `supportedModels()` resolves noticeably slower than `supportedCommands()`
@@ -623,7 +623,7 @@ export class ClaudeSessionManager implements SessionManager {
 	async listSlashCommands(
 		params: ListSlashCommandsParams,
 	): Promise<readonly SlashCommandInfo[]> {
-		const { cwd, model } = params;
+		const { cwd } = params;
 		const abortController = new AbortController();
 
 		let resolveDone: () => void = () => undefined;
@@ -652,7 +652,6 @@ export class ClaudeSessionManager implements SessionManager {
 				pathToClaudeCodeExecutable: CLAUDE_CLI_PATH,
 				...executableOptions(),
 				cwd: cwd || undefined,
-				model: model || undefined,
 				permissionMode: "bypassPermissions",
 				allowDangerouslySkipPermissions: true,
 				includePartialMessages: false,
@@ -674,7 +673,6 @@ export class ClaudeSessionManager implements SessionManager {
 				if (!isAbortError(err)) {
 					logger.error("Claude slash-command drain failed", {
 						cwd: cwd || "(none)",
-						model: model || "(default)",
 						...errorDetails(err),
 					});
 				}
@@ -695,7 +693,6 @@ export class ClaudeSessionManager implements SessionManager {
 			} catch (err) {
 				logger.error("Claude slash-command timeout abort failed", {
 					cwd: cwd || "(none)",
-					model: model || "(default)",
 					...errorDetails(err),
 				});
 			}
@@ -735,7 +732,6 @@ export class ClaudeSessionManager implements SessionManager {
 			} catch (err) {
 				logger.error("Claude slash-command cleanup failed during abort()", {
 					cwd: cwd || "(none)",
-					model: model || "(default)",
 					...errorDetails(err),
 				});
 			}
@@ -744,7 +740,6 @@ export class ClaudeSessionManager implements SessionManager {
 			} catch (err) {
 				logger.error("Claude slash-command cleanup failed during q.close()", {
 					cwd: cwd || "(none)",
-					model: model || "(default)",
 					...errorDetails(err),
 				});
 			}
@@ -752,7 +747,6 @@ export class ClaudeSessionManager implements SessionManager {
 				if (!isAbortError(err)) {
 					logger.error("Claude slash-command drain join failed", {
 						cwd: cwd || "(none)",
-						model: model || "(default)",
 						...errorDetails(err),
 					});
 				}

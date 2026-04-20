@@ -139,6 +139,7 @@ pub fn run() {
             agents::respond_to_elicitation_request,
             agents::generate_session_title,
             agents::list_slash_commands,
+            agents::prewarm_slash_commands_for_workspace,
             commands::workspace_commands::prepare_archive_workspace,
             commands::workspace_commands::start_archive_workspace,
             commands::workspace_commands::validate_archive_workspace,

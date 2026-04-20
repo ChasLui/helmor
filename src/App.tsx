@@ -69,6 +69,7 @@ import {
 	listenGitBranchChanged,
 	listenGitRefsChanged,
 	openWorkspaceInEditor,
+	prewarmSlashCommandsForWorkspace,
 	setWorkspaceManualStatus,
 	triggerWorkspaceFetch,
 	type WorkspaceDetail,
@@ -1070,6 +1071,10 @@ function AppShell({
 				);
 				if (cachedDetail?.state !== "initializing") {
 					triggerWorkspaceFetch(workspaceId);
+					// Prewarm the slash-command cache for the new workspace so
+					// the next `/` press hits warm data (or at least falls back
+					// to the repo-level cache while this refresh completes).
+					void prewarmSlashCommandsForWorkspace(workspaceId);
 				}
 			}
 
