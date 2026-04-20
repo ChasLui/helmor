@@ -2,5 +2,4 @@
 "helmor": patch
 ---
 
-Unify loading spinner colors in the chat view:
-- Batched tool groups (e.g. "Reading 2 files…") now use the same muted gray spinner as individual tool calls while streaming, instead of a green one, so every in-flight indicator in a message looks consistent.
+Match the loading spinner next to batched tool groups (e.g. "Reading 2 files…") to the muted gray used for individual streaming tool calls, so every in-flight indicator in a chat message shares the same color.
