@@ -34,6 +34,17 @@ export const TABS_HOVER_TRANSITION_MS = 400;
 // zoomed panel is twice as wide and twice as tall as its resting size,
 // growing up-and-left from the bottom-right anchor.
 export const TABS_HOVER_ZOOM_MULTIPLIER = 2;
+// A quick blur "pulse" we run on the inner content while the container
+// is mid-transition. During the CSS width/height animation the inner
+// terminal canvas is being GPU-upscaled (on expand) or downscaled (on
+// collapse) — it's only really crisp once xterm's FitAddon re-fits at
+// the end. Blurring the content through the transition hides that
+// scaling artefact and the final re-layout flash.
+const TABS_BLUR_PEAK_PX = 6;
+const TABS_BLUR_FADE_MS = 120;
+// Hold blur past the end of the transition so the xterm re-fit (which
+// runs ~50ms after the main transition finishes) is still hidden.
+const TABS_BLUR_HOLD_UNTIL_MS = TABS_HOVER_TRANSITION_MS - 50;
 // Minimum layout height of the collapsed wrapper. The real content lives
 // inside an absolutely-positioned child, so we need to reserve this
 // space explicitly to keep the header row visible when the panel is
@@ -96,8 +107,14 @@ export function InspectorTabsSection({
 	// zoomed visual identity stays consistent while the size is changing — the
 	// collapsing panel looks exactly like the expanding one in reverse.
 	const [isZoomPresented, setIsZoomPresented] = useState(false);
+	// Short-lived flag that applies a gaussian blur to the inner
+	// header+body while the panel is mid-transition. Masks the frames where
+	// xterm's canvas is being GPU-scaled and then re-fit, which would
+	// otherwise look like "ugly stretched pixels, then a snap".
+	const [isContentBlurred, setIsContentBlurred] = useState(false);
 	const hoverTimerRef = useRef<number | null>(null);
 	const presentationClearTimerRef = useRef<number | null>(null);
+	const blurClearTimerRef = useRef<number | null>(null);
 	// Holds the outstanding `suspendTerminalFit()` release while the CSS
 	// width/height transition is running, plus the timer that will release it
 	// and trigger the final fit.
@@ -117,6 +134,27 @@ export function InspectorTabsSection({
 			presentationClearTimerRef.current = null;
 		}
 	}, []);
+
+	const clearBlurTimer = useCallback(() => {
+		if (blurClearTimerRef.current !== null) {
+			window.clearTimeout(blurClearTimerRef.current);
+			blurClearTimerRef.current = null;
+		}
+	}, []);
+
+	// Run a quick fade-in → hold → fade-out blur over the inner content
+	// during the transition. Fires on both expand and collapse because the
+	// canvas artefacts and the xterm re-fit flash happen in both directions.
+	// Calling this while a pulse is already underway just extends the hold
+	// window, so rapid hover-in/out doesn't produce a stuttery blur.
+	const triggerContentBlurPulse = useCallback(() => {
+		clearBlurTimer();
+		setIsContentBlurred(true);
+		blurClearTimerRef.current = window.setTimeout(() => {
+			blurClearTimerRef.current = null;
+			setIsContentBlurred(false);
+		}, TABS_BLUR_HOLD_UNTIL_MS);
+	}, [clearBlurTimer]);
 
 	const releaseTerminalFitLock = useCallback(() => {
 		if (fitReleaseTimerRef.current !== null) {
@@ -161,6 +199,10 @@ export function InspectorTabsSection({
 	// consistent with the shrinking box.
 	const setZoomTarget = useCallback(
 		(target: boolean) => {
+			// Fire the blur pulse on every direction change. It masks the
+			// canvas-stretch frames during the CSS transition AND the sharp
+			// re-fit flash that happens right after the transition ends.
+			triggerContentBlurPulse();
 			if (target) {
 				clearPresentationClearTimer();
 				setIsZoomPresented(true);
@@ -173,7 +215,7 @@ export function InspectorTabsSection({
 			}
 			setIsHoverExpanded(target);
 		},
-		[clearPresentationClearTimer],
+		[clearPresentationClearTimer, triggerContentBlurPulse],
 	);
 
 	const handleMouseEnter = useCallback(() => {
@@ -200,14 +242,17 @@ export function InspectorTabsSection({
 		if (!open) {
 			clearHoverTimer();
 			clearPresentationClearTimer();
+			clearBlurTimer();
 			releaseTerminalFitLock();
 			setIsHoverExpanded(false);
 			setIsZoomPresented(false);
+			setIsContentBlurred(false);
 		}
 	}, [
 		open,
 		clearHoverTimer,
 		clearPresentationClearTimer,
+		clearBlurTimer,
 		releaseTerminalFitLock,
 	]);
 
@@ -216,9 +261,15 @@ export function InspectorTabsSection({
 		return () => {
 			clearHoverTimer();
 			clearPresentationClearTimer();
+			clearBlurTimer();
 			releaseTerminalFitLock();
 		};
-	}, [clearHoverTimer, clearPresentationClearTimer, releaseTerminalFitLock]);
+	}, [
+		clearHoverTimer,
+		clearPresentationClearTimer,
+		clearBlurTimer,
+		releaseTerminalFitLock,
+	]);
 
 	const zoomedSize = `${TABS_HOVER_ZOOM_MULTIPLIER * 100}%`;
 
@@ -295,7 +346,21 @@ export function InspectorTabsSection({
 						isZoomPresented && "border-t border-t-border/60",
 					)}
 				>
-					<div className="flex min-h-0 flex-1 flex-col gap-0">
+					<div
+						className="flex min-h-0 flex-1 flex-col gap-0"
+						style={{
+							// Gaussian blur pulse during the transition. `filter` is
+							// GPU-composited so this costs almost nothing; wrapping
+							// header + body (but NOT the section with its bg/border)
+							// means the container's edges stay crisp while the
+							// content inside looks like it's "focusing in / out."
+							filter: isContentBlurred
+								? `blur(${TABS_BLUR_PEAK_PX}px)`
+								: "blur(0)",
+							transition: `filter ${TABS_BLUR_FADE_MS}ms ease-out`,
+							willChange: "filter",
+						}}
+					>
 						<div
 							className={cn(
 								INSPECTOR_SECTION_HEADER_CLASS,
