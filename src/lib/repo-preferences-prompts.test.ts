@@ -6,10 +6,8 @@ import {
 } from "./repo-preferences-prompts";
 
 describe("repo preference prompts", () => {
-	it("falls back to the built-in preview when no override exists", () => {
-		expect(resolveRepoPreferencePreview("general", {})).toContain(
-			"Follow this repository's existing conventions closely.",
-		);
+	it("leaves the general preview empty when no override exists", () => {
+		expect(resolveRepoPreferencePreview("general", {})).toBe("");
 	});
 
 	it("uses the override instead of the built-in prompt", () => {
@@ -41,6 +39,12 @@ describe("repo preference prompts", () => {
 			}),
 		).toBe(
 			"Always explain the root cause first.\n\nUser request:\nFix the failing tests.",
+		);
+	});
+
+	it("leaves the first user message unchanged when general is empty", () => {
+		expect(prependGeneralPreferencePrompt("Fix the failing tests.", {})).toBe(
+			"Fix the failing tests.",
 		);
 	});
 });
