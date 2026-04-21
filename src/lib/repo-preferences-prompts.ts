@@ -17,12 +17,6 @@ type ResolveRepoPreferencePromptArgs = {
 	dirtyWorktree?: boolean;
 };
 
-const DEFAULT_GENERAL_PROMPT = `Follow this repository's existing conventions closely.
-
-- Inspect nearby code before changing structure or style.
-- Prefer minimal, coherent changes over broad refactors.
-- Keep naming, formatting, and architecture aligned with the existing codebase.`;
-
 const DEFAULT_BRANCH_RENAME_PROMPT = `When you generate the branch name segment for a new chat:
 
 - Base it on the user's first message.
@@ -68,7 +62,7 @@ Do the following, in order:
 If a conflict is too ambiguous to resolve automatically, stop and ask.`,
 
 	branchRename: DEFAULT_BRANCH_RENAME_PROMPT,
-	general: DEFAULT_GENERAL_PROMPT,
+	general: "",
 };
 
 export const REPO_PREFERENCE_LABELS: Record<RepoPreferenceKey, string> = {
