@@ -266,15 +266,15 @@ export function MarketingShell({ data }: { data: RepoData }) {
 						</a>
 
 						<h1 className="hero">
-							<span className="line2">AI made you 10×.</span>
+							<span className="line2">AI made coding faster.</span>
 							<span className="and" />
-							Helmor takes you 100×.
+							Helmor is about finishing the rest of the loop.
 						</h1>
 
 						<p className="sub">
-							The local-first IDE for coding agent orchestration. Run Claude
-							Code and Codex side-by-side across worktrees, on your machine.
-							Plan. Run. Review — without handing your source tree to a vendor.
+							An open-source local workbench for multi-agent software
+							development. Built for orchestration, review, testing, merge, and
+							everything around the code.
 						</p>
 
 						<div className="cta">
