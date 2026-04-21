@@ -722,6 +722,7 @@ mod tests {
         git(dir.path(), &["checkout", "-b", "main"]);
         git(dir.path(), &["config", "user.email", "test@helmor.dev"]);
         git(dir.path(), &["config", "user.name", "Test"]);
+        git(dir.path(), &["config", "commit.gpgsign", "false"]);
         std::fs::write(dir.path().join("f.txt"), "init\n").unwrap();
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-m", "init"]);

@@ -21,10 +21,22 @@ pub fn dispatch(action: &FilesAction, cli: &Cli) -> Result<()> {
             path,
             git_ref,
         } => show(workspace_ref, path, git_ref.as_deref(), cli),
-        FilesAction::Write { workspace_ref, path } => write(workspace_ref, path, cli),
-        FilesAction::Stage { workspace_ref, path } => stage(workspace_ref, path, cli),
-        FilesAction::Unstage { workspace_ref, path } => unstage(workspace_ref, path, cli),
-        FilesAction::Discard { workspace_ref, path } => discard(workspace_ref, path, cli),
+        FilesAction::Write {
+            workspace_ref,
+            path,
+        } => write(workspace_ref, path, cli),
+        FilesAction::Stage {
+            workspace_ref,
+            path,
+        } => stage(workspace_ref, path, cli),
+        FilesAction::Unstage {
+            workspace_ref,
+            path,
+        } => unstage(workspace_ref, path, cli),
+        FilesAction::Discard {
+            workspace_ref,
+            path,
+        } => discard(workspace_ref, path, cli),
     }
 }
 
@@ -32,10 +44,7 @@ fn resolve_workspace_root(workspace_ref: &str) -> Result<PathBuf> {
     let id = service::resolve_workspace_ref(workspace_ref)?;
     let record = workspace_models::load_workspace_record_by_id(&id)?
         .with_context(|| format!("Workspace not found: {id}"))?;
-    Ok(crate::data_dir::workspace_dir(
-        &record.repo_name,
-        &record.directory_name,
-    )?)
+    crate::data_dir::workspace_dir(&record.repo_name, &record.directory_name)
 }
 
 /// Turn a possibly-relative `<path>` into an absolute path inside the
@@ -52,32 +61,32 @@ fn resolve_absolute(workspace_root: &Path, path: &str) -> PathBuf {
 fn changes(workspace_ref: &str, cli: &Cli) -> Result<()> {
     let root = resolve_workspace_root(workspace_ref)?;
     let items = editor_files::list_workspace_changes(&root.display().to_string())?;
-    output::print(cli, &items, format_list)
+    output::print(cli, &items, |items| format_list(items))
 }
 
 fn list(workspace_ref: &str, cli: &Cli) -> Result<()> {
     let root = resolve_workspace_root(workspace_ref)?;
     let items = editor_files::list_workspace_files(&root.display().to_string())?;
-    output::print(cli, &items, format_list)
+    output::print(cli, &items, |items| format_list(items))
 }
 
-fn format_list(items: &Vec<editor_files::EditorFileListItem>) -> String {
+fn format_list(items: &[editor_files::EditorFileListItem]) -> String {
     if items.is_empty() {
         return "No files.".to_string();
     }
     items
         .iter()
-        .map(|f| format!("{}\t+{} -{}\t{}", f.status, f.insertions, f.deletions, f.path))
+        .map(|f| {
+            format!(
+                "{}\t+{} -{}\t{}",
+                f.status, f.insertions, f.deletions, f.path
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn show(
-    workspace_ref: &str,
-    path: &str,
-    git_ref: Option<&str>,
-    cli: &Cli,
-) -> Result<()> {
+fn show(workspace_ref: &str, path: &str, git_ref: Option<&str>, cli: &Cli) -> Result<()> {
     let root = resolve_workspace_root(workspace_ref)?;
     let absolute = resolve_absolute(&root, path);
     if let Some(git_ref) = git_ref {
