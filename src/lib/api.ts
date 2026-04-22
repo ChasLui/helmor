@@ -1581,8 +1581,14 @@ export type ReasoningPart = {
 	type: "reasoning";
 	id: string;
 	text: string;
-	/** Per-part streaming state — only the active thinking block is streaming. */
+	/**
+	 * Live-streaming state. `true` = actively generating, `false` = just
+	 * finished in the current live session (pipeline only sets this during
+	 * streaming, never persists it), `undefined` = historical / unknown.
+	 */
 	streaming?: boolean;
+	/** Backend-measured elapsed time for a completed reasoning block. */
+	durationMs?: number;
 };
 export type ToolCallPart = {
 	type: "tool-call";
