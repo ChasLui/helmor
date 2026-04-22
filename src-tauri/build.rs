@@ -7,7 +7,7 @@ const UPDATER_ENDPOINTS_KEY: &str = "HELMOR_UPDATER_ENDPOINTS";
 const UPDATER_PUBKEY_KEY: &str = "HELMOR_UPDATER_PUBKEY";
 
 fn main() {
-    ensure_bundled_cli_placeholder();
+    ensure_external_bin_placeholders();
     tauri_build::build();
 
     println!("cargo:rerun-if-changed=build.rs");
@@ -25,27 +25,44 @@ fn main() {
     }
 }
 
-fn ensure_bundled_cli_placeholder() {
+fn ensure_external_bin_placeholders() {
     let Ok(target) = env::var("TARGET") else {
         return;
     };
 
     let manifest_dir =
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"));
-    let bundled_dir = manifest_dir.join("target").join("bundled");
-    let bundled_cli = bundled_dir.join(format!("helmor-cli-{target}"));
+    ensure_executable_placeholder(
+        manifest_dir
+            .join("target")
+            .join("bundled")
+            .join(format!("helmor-cli-{target}")),
+    );
 
-    if bundled_cli.exists() {
+    if let Some(repo_root) = manifest_dir.parent() {
+        ensure_executable_placeholder(
+            repo_root
+                .join("sidecar")
+                .join("dist")
+                .join(format!("helmor-sidecar-{target}")),
+        );
+    }
+}
+
+fn ensure_executable_placeholder(path: PathBuf) {
+    if path.exists() {
         return;
     }
 
-    let _ = fs::create_dir_all(&bundled_dir);
-    let _ = fs::write(&bundled_cli, "#!/bin/sh\nexit 0\n");
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, "#!/bin/sh\nexit 0\n");
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&bundled_cli, fs::Permissions::from_mode(0o755));
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o755));
     }
 }
 

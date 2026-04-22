@@ -94,13 +94,6 @@ function main() {
 	run("bun run build", sidecarDir);
 
 	const triple = detectTargetTriple();
-	run(
-		`cargo build --manifest-path ${resolve(srcTauriDir, "Cargo.toml")} --bin helmor-cli --release --target ${triple}`,
-		repoRoot,
-	);
-
-	mkdirSync(bundledBinDir, { recursive: true });
-
 	const sidecarSource = resolve(sidecarDir, "dist", "helmor-sidecar");
 	const sidecarDestination = resolve(
 		sidecarDir,
@@ -123,13 +116,25 @@ function main() {
 			`[prepare-sidecar] expected compiled sidecar at ${sidecarSource} but it does not exist`,
 		);
 	}
+
+	// Tauri validates every `externalBin` during `cargo build`, including the
+	// sidecar companion. Stage the target-suffixed sidecar first so a clean CI
+	// checkout can compile `helmor-cli` without depending on stale artifacts.
+	copyFileSync(sidecarSource, sidecarDestination);
+
+	run(
+		`cargo build --manifest-path ${resolve(srcTauriDir, "Cargo.toml")} --bin helmor-cli --release --target ${triple}`,
+		repoRoot,
+	);
+
+	mkdirSync(bundledBinDir, { recursive: true });
+
 	if (!existsSync(cliSource)) {
 		throw new Error(
 			`[prepare-sidecar] expected compiled CLI at ${cliSource} but it does not exist`,
 		);
 	}
 
-	copyFileSync(sidecarSource, sidecarDestination);
 	copyFileSync(cliSource, cliDestination);
 
 	// Sign the target-suffixed copy (the one Tauri ingests as externalBin).
