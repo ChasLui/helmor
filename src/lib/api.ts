@@ -1527,14 +1527,6 @@ export async function markSessionUnread(
 	});
 }
 
-export async function markWorkspaceRead(
-	workspaceId: string,
-): Promise<MarkWorkspaceReadResponse> {
-	return invoke<MarkWorkspaceReadResponse>("mark_workspace_read", {
-		workspaceId,
-	});
-}
-
 export async function markWorkspaceUnread(
 	workspaceId: string,
 ): Promise<MarkWorkspaceReadResponse> {
