@@ -271,13 +271,25 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    // All user-initiated app-exit paths (red close button on the
-    // main window, Cmd+Q, macOS app-menu Quit) are intercepted here and
-    // routed through a single `helmor://quit-requested` event. The
-    // frontend's QuitConfirmDialog listens for it, checks for in-flight
-    // tasks, and calls back into `request_quit` which eventually runs
-    // `app.exit(0)`. That programmatic exit comes back as ExitRequested
-    // with `code: Some(_)`, which we deliberately let through.
+    // Every user-initiated app-exit path is intercepted here and routed
+    // through a single `helmor://quit-requested` event. The frontend's
+    // QuitConfirmDialog listens for that event, checks for in-flight
+    // tasks, and calls back into the `request_quit` IPC command — which
+    // cleans up (stops git watchers, SIGTERM's the sidecar) and then
+    // invokes `app.exit(0)`.
+    //
+    //   Source                                  | Rust branch
+    //   ----------------------------------------|-------------------------
+    //   Red close button / Cmd+W (main window)  | WindowEvent::CloseRequested
+    //   Cmd+Q, app-menu Quit (macOS)            | on_menu_event helmor-quit
+    //   Dock Quit / system shutdown / SIGINT    | RunEvent::ExitRequested { code: None }
+    //   Our own request_quit -> app.exit(0)     | ExitRequested { code: Some(_) }  (passthrough)
+    //
+    // Note: the `ExitRequested { code: None }` branch is a pure safety
+    // net for non-frontend-driven exits. The custom macOS menu above
+    // means Cmd+Q never actually takes this path; it exists so a
+    // Dock-menu Quit or unexpected OS-level exit can't slip through
+    // without confirmation on macOS.
     app.run(|app_handle, event| match event {
         tauri::RunEvent::Resumed => {
             updater::maybe_trigger_on_resume(app_handle.clone());
@@ -297,6 +309,7 @@ pub fn run() {
             api.prevent_close();
             emit_quit_requested(app_handle);
         }
+        #[cfg(target_os = "macos")]
         tauri::RunEvent::ExitRequested {
             code: None, api, ..
         } => {
@@ -307,9 +320,17 @@ pub fn run() {
     });
 }
 
+// Route a user-initiated exit through the frontend quit-confirm flow.
+// If the emit fails the webview is almost certainly gone, so falling
+// back to a direct exit is safer than leaving the process hanging with
+// no UI and no way to quit.
 fn emit_quit_requested(app_handle: &tauri::AppHandle) {
     if let Err(e) = app_handle.emit("helmor://quit-requested", ()) {
-        tracing::warn!(error = %e, "Failed to emit quit-requested event");
+        tracing::warn!(
+            error = %e,
+            "Failed to emit quit-requested event; exiting directly",
+        );
+        app_handle.exit(0);
     }
 }
 

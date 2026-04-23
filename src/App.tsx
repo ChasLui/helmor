@@ -36,10 +36,8 @@ import { useDockUnreadBadge } from "@/features/dock-badge";
 import { WorkspaceEditorSurface } from "@/features/editor";
 import { WorkspaceInspectorSidebar } from "@/features/inspector";
 import { WorkspacesSidebarContainer } from "@/features/navigation/container";
-import { shouldConfirmRunningSessionClose } from "@/features/panel/close-guard";
-import { RunningSessionCloseDialog } from "@/features/panel/running-session-close-dialog";
 import { seedNewSessionInCache } from "@/features/panel/session-cache";
-import { closeWorkspaceSession } from "@/features/panel/session-close";
+import { useConfirmSessionClose } from "@/features/panel/use-confirm-session-close";
 import { SettingsButton, SettingsDialog } from "@/features/settings";
 import { useAppUpdater } from "@/features/updater/use-app-updater";
 import {
@@ -76,7 +74,6 @@ import {
 	openWorkspaceInEditor,
 	prewarmSlashCommandsForWorkspace,
 	setWorkspaceManualStatus,
-	stopAgentStream,
 	triggerWorkspaceFetch,
 	type WorkspaceDetail,
 	type WorkspaceGroup,
@@ -438,10 +435,6 @@ function AppShell({
 	);
 	const [interactionRequiredSessions, setInteractionRequiredSessions] =
 		useState<Map<string, string>>(() => new Map());
-	const [confirmCloseSessionId, setConfirmCloseSessionId] = useState<
-		string | null
-	>(null);
-	const [confirmCloseLoading, setConfirmCloseLoading] = useState(false);
 	const interactionRequiredSessionIds = useMemo(
 		() => new Set(interactionRequiredSessions.keys()),
 		[interactionRequiredSessions],
@@ -1508,134 +1501,45 @@ function AppShell({
 		};
 	}, [queryClient]);
 
+	const { requestClose: requestCloseSession, dialogNode: closeConfirmDialog } =
+		useConfirmSessionClose({
+			sendingSessionIds,
+			onSelectSession: handleSelectSession,
+			pushToast: pushWorkspaceToast,
+			queryClient,
+		});
+
 	const handleCloseSelectedSession = useCallback(async () => {
 		const currentSession = getCloseableCurrentSession();
-		if (!currentSession) {
-			return false;
-		}
-		if (
-			currentSession.session &&
-			shouldConfirmRunningSessionClose(
-				currentSession.session,
-				sendingSessionIds,
-			)
-		) {
-			setConfirmCloseSessionId(currentSession.sessionId);
-			return false;
+		if (!currentSession?.session) {
+			return;
 		}
 
-		await closeWorkspaceSession({
-			queryClient,
-			workspace: currentSession.workspace,
-			sessions: currentSession.sessions,
-			sessionId: currentSession.sessionId,
-			onSelectSession: handleSelectSession,
+		const { workspaceId, sessionId, workspace, sessions, session } =
+			currentSession;
+
+		await requestCloseSession({
+			workspace,
+			sessions,
+			session,
 			onSessionsChanged: () => {
 				void Promise.all([
 					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.workspaceDetail(
-							currentSession.workspaceId,
-						),
+						queryKey: helmorQueryKeys.workspaceDetail(workspaceId),
 					}),
 					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.workspaceSessions(
-							currentSession.workspaceId,
-						),
+						queryKey: helmorQueryKeys.workspaceSessions(workspaceId),
 					}),
 					queryClient.invalidateQueries({
 						queryKey: helmorQueryKeys.workspaceGroups,
 					}),
 					queryClient.invalidateQueries({
-						queryKey: [
-							...helmorQueryKeys.sessionMessages(currentSession.sessionId),
-							"thread",
-						],
+						queryKey: [...helmorQueryKeys.sessionMessages(sessionId), "thread"],
 					}),
 				]);
 			},
-			pushToast: pushWorkspaceToast,
 		});
-		return true;
-	}, [
-		getCloseableCurrentSession,
-		handleSelectSession,
-		pushWorkspaceToast,
-		queryClient,
-		sendingSessionIds,
-	]);
-
-	const handleConfirmCloseSelectedSession = useCallback(async () => {
-		const currentSession = getCloseableCurrentSession();
-		if (
-			!currentSession?.session ||
-			currentSession.session.id !== confirmCloseSessionId
-		) {
-			setConfirmCloseSessionId(null);
-			return;
-		}
-
-		setConfirmCloseLoading(true);
-		try {
-			await stopAgentStream(
-				currentSession.session.id,
-				currentSession.session.agentType ?? undefined,
-			);
-		} catch (error) {
-			pushWorkspaceToast(
-				error instanceof Error ? error.message : String(error),
-				"Unable to stop chat",
-				"destructive",
-			);
-			setConfirmCloseLoading(false);
-			return;
-		}
-
-		setConfirmCloseSessionId(null);
-		setConfirmCloseLoading(false);
-		await closeWorkspaceSession({
-			queryClient,
-			workspace: currentSession.workspace,
-			sessions: currentSession.sessions,
-			sessionId: currentSession.sessionId,
-			onSelectSession: handleSelectSession,
-			onSessionsChanged: () => {
-				void Promise.all([
-					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.workspaceDetail(
-							currentSession.workspaceId,
-						),
-					}),
-					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.workspaceSessions(
-							currentSession.workspaceId,
-						),
-					}),
-					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.workspaceGroups,
-					}),
-					queryClient.invalidateQueries({
-						queryKey: [
-							...helmorQueryKeys.sessionMessages(currentSession.sessionId),
-							"thread",
-						],
-					}),
-				]);
-			},
-			pushToast: pushWorkspaceToast,
-		});
-	}, [
-		confirmCloseSessionId,
-		getCloseableCurrentSession,
-		handleSelectSession,
-		pushWorkspaceToast,
-		queryClient,
-	]);
-	const confirmCloseSession =
-		confirmCloseSessionId !== null
-			? getCloseableCurrentSession()?.session
-			: null;
-	const confirmCloseAgentLabel =
-		confirmCloseSession?.agentType === "codex" ? "Codex" : "Claude";
+	}, [getCloseableCurrentSession, queryClient, requestCloseSession]);
 
 	const handleCreateSession = useCallback(async () => {
 		const workspaceId = selectedWorkspaceIdRef.current;
@@ -2255,6 +2159,7 @@ function AppShell({
 												onQueuePendingPromptForSession={
 													queuePendingPromptForSession
 												}
+												onRequestCloseSession={requestCloseSession}
 												workspaceRootPath={workspaceRootPath}
 												onOpenFileReference={handleOpenFileReference}
 												headerLeading={
@@ -2442,18 +2347,7 @@ function AppShell({
 						position="bottom-right"
 						visibleToasts={6}
 					/>
-					<RunningSessionCloseDialog
-						open={confirmCloseSessionId !== null}
-						agentLabel={confirmCloseAgentLabel}
-						loading={confirmCloseLoading}
-						onOpenChange={(open) => {
-							if (confirmCloseLoading || open) {
-								return;
-							}
-							setConfirmCloseSessionId(null);
-						}}
-						onConfirm={() => void handleConfirmCloseSelectedSession()}
-					/>
+					{closeConfirmDialog}
 				</ComposerInsertProvider>
 			</WorkspaceToastProvider>
 			<QuitConfirmDialog sendingSessionIds={sendingSessionIds} />

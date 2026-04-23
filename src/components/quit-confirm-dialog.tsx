@@ -1,5 +1,4 @@
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { requestQuit } from "@/lib/api";
@@ -11,83 +10,46 @@ export function QuitConfirmDialog({
 }) {
 	const [open, setOpen] = useState(false);
 	const sendingRef = useRef(sendingSessionIds);
-	const quitRequestActiveRef = useRef(false);
 	sendingRef.current = sendingSessionIds;
 
 	const handleQuit = useCallback(async (force: boolean) => {
 		setOpen(false);
-		try {
-			await requestQuit(force);
-		} finally {
-			quitRequestActiveRef.current = false;
-		}
-	}, []);
-
-	const handleQuitRequested = useCallback(() => {
-		if (quitRequestActiveRef.current) {
-			return;
-		}
-		quitRequestActiveRef.current = true;
-
-		if (sendingRef.current.size === 0) {
-			void Promise.resolve(requestQuit(false)).finally(() => {
-				quitRequestActiveRef.current = false;
-			});
-			return;
-		}
-
-		setOpen(true);
-	}, []);
-
-	const handleOpenChange = useCallback((nextOpen: boolean) => {
-		setOpen(nextOpen);
-		if (!nextOpen) {
-			quitRequestActiveRef.current = false;
-		}
+		await requestQuit(force);
 	}, []);
 
 	useEffect(() => {
 		let disposed = false;
-		let unlistenCloseRequested: (() => void) | undefined;
-		let unlistenQuitRequested: (() => void) | undefined;
+		let unlisten: (() => void) | undefined;
 
-		void getCurrentWindow()
-			.onCloseRequested((event) => {
-				event.preventDefault();
-				handleQuitRequested();
-			})
-			.then((fn) => {
-				if (disposed) {
-					fn();
-					return;
-				}
-				unlistenCloseRequested = fn;
-			});
-
-		// Rust intercepts every app-exit path (close button,
-		// Cmd+Q, app-menu Quit) and emits this event. We're the
-		// only gate that knows about in-flight tasks.
-		void listen("helmor://quit-requested", handleQuitRequested).then((fn) => {
+		// Rust intercepts every OS-level exit path (close button, Cmd+Q,
+		// app-menu Quit, programmatic ExitRequested) and emits this
+		// event. We're the only gate that knows about in-flight tasks.
+		void listen("helmor://quit-requested", () => {
+			if (sendingRef.current.size === 0) {
+				void requestQuit(false);
+				return;
+			}
+			setOpen(true);
+		}).then((fn) => {
 			if (disposed) {
 				fn();
 				return;
 			}
-			unlistenQuitRequested = fn;
+			unlisten = fn;
 		});
 
 		return () => {
 			disposed = true;
-			unlistenCloseRequested?.();
-			unlistenQuitRequested?.();
+			unlisten?.();
 		};
-	}, [handleQuitRequested]);
+	}, []);
 
 	const count = sendingSessionIds.size;
 
 	return (
 		<ConfirmDialog
 			open={open}
-			onOpenChange={handleOpenChange}
+			onOpenChange={setOpen}
 			title="Quit Helmor?"
 			description={
 				count === 1

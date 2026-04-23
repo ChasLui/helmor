@@ -19,13 +19,7 @@ const apiMocks = vi.hoisted(() => ({
 	loadWorkspaceSessions: vi.fn(),
 	loadSessionThreadMessages: vi.fn(),
 	stopAgentStream: vi.fn(),
-}));
-
-const windowApiMocks = vi.hoisted(() => ({
-	onCloseRequested: vi.fn(),
-	closeRequestedHandler: null as
-		| ((event: { preventDefault: () => void }) => void | Promise<void>)
-		| null,
+	requestQuit: vi.fn(),
 }));
 
 const eventApiMocks = vi.hoisted(() => ({
@@ -59,16 +53,6 @@ vi.mock("./lib/platform", () => ({
 }));
 vi.mock("@tauri-apps/api/window", () => ({
 	getCurrentWindow: () => ({
-		onCloseRequested: windowApiMocks.onCloseRequested.mockImplementation(
-			async (handler: typeof windowApiMocks.closeRequestedHandler) => {
-				windowApiMocks.closeRequestedHandler = handler;
-				return () => {
-					if (windowApiMocks.closeRequestedHandler === handler) {
-						windowApiMocks.closeRequestedHandler = null;
-					}
-				};
-			},
-		),
 		setBadgeCount: vi.fn(async () => {}),
 	}),
 }));
@@ -91,7 +75,7 @@ vi.mock("./lib/api", async (importOriginal) => {
 		loadWorkspaceSessions: apiMocks.loadWorkspaceSessions,
 		loadSessionMessages: apiMocks.loadSessionThreadMessages,
 		loadSessionThreadMessages: apiMocks.loadSessionThreadMessages,
-		requestQuit: vi.fn(),
+		requestQuit: apiMocks.requestQuit,
 		stopAgentStream: apiMocks.stopAgentStream,
 	};
 });
@@ -363,8 +347,6 @@ describe("App global navigation shortcuts", () => {
 		apiMocks.stopAgentStream.mockReset();
 		eventApiMocks.listen.mockClear();
 		eventApiMocks.handlers.clear();
-		windowApiMocks.onCloseRequested.mockClear();
-		windowApiMocks.closeRequestedHandler = null;
 		apiMocks.createSession.mockImplementation(async (workspaceId: string) => {
 			const nextSessionId = `${workspaceId}-session-new`;
 			addSessionFixture(workspaceId as WorkspaceFixtureId, nextSessionId);
@@ -723,12 +705,8 @@ describe("App global navigation shortcuts", () => {
 		);
 	});
 
-	it("closes the current session on Command+W and swallows the follow-up window close", async () => {
+	it("closes the current session on Command+W", async () => {
 		await renderAppReady();
-
-		await waitFor(() => {
-			expect(windowApiMocks.closeRequestedHandler).not.toBeNull();
-		});
 
 		fireEvent.keyDown(window, {
 			key: "w",
@@ -740,12 +718,17 @@ describe("App global navigation shortcuts", () => {
 		});
 		expect(apiMocks.hideSession).toHaveBeenCalledWith("session-done-1");
 		expect(apiMocks.deleteSession).not.toHaveBeenCalled();
+	});
 
-		// QuitConfirmDialog always prevents the JS-layer close.
-		const preventDefault = vi.fn();
-		await windowApiMocks.closeRequestedHandler?.({ preventDefault });
+	it("quits silently on a Rust-emitted quit-requested event when nothing is in flight", async () => {
+		apiMocks.requestQuit.mockReset();
+		await renderAppReady();
 
-		expect(preventDefault).toHaveBeenCalledTimes(1);
+		emitTauriEvent("helmor://quit-requested");
+
+		await waitFor(() => {
+			expect(apiMocks.requestQuit).toHaveBeenCalledWith(false);
+		});
 	});
 
 	it("closes the current session when macOS emits the close-current-session event", async () => {
