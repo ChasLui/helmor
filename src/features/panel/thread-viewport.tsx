@@ -854,7 +854,25 @@ function ProgressiveConversationViewport({
 				return;
 			}
 
-			if (scrollParent && row.top + headerHeight < scrollParent.scrollTop) {
+			const isStreamingRow = row.message.streaming === true;
+
+			// The streaming row's height changes are pure bottom-extensions:
+			// only its own offsetBottom grows, there are no rows below it to
+			// be pushed down, and the user's reading position is unaffected.
+			// `useStickToBottom` already follows scrollHeight growth via its
+			// smooth animation, so adjusting scrollTop here on top of that
+			// double-pushes past maxTop, gets clamped, and desyncs the
+			// library's internal state from the DOM — producing a
+			// one-line-high up/down jitter that is very visible in fast
+			// streams once the streaming row itself has grown past the
+			// scrollTop. Skip the adjust for the streaming row; keep it for
+			// historical rows (image loads, code highlighting, late font
+			// swaps) where it is genuinely needed.
+			if (
+				!isStreamingRow &&
+				scrollParent &&
+				row.top + headerHeight < scrollParent.scrollTop
+			) {
 				pendingScrollAdjustmentRef.current += roundedHeight - previousHeight;
 			}
 
@@ -870,7 +888,7 @@ function ProgressiveConversationViewport({
 			// we don't need `flushSync` here — which in long threads becomes
 			// O(n) and re-introduces stuttering near the end of a long
 			// streamed reply.
-			if (row.message.streaming === true) {
+			if (isStreamingRow) {
 				commit();
 			} else {
 				startTransition(commit);
