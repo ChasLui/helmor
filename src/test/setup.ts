@@ -110,6 +110,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 // commands the boot path hits; individual tests still mock `./lib/api`
 // directly when they need specific return values.
 vi.mock("@tauri-apps/api/core", () => ({
+	convertFileSrc: vi.fn((path: string) => `asset://localhost${path}`),
 	invoke: vi.fn(async (command: string) => {
 		switch (command) {
 			case "get_github_identity_session":
