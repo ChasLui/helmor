@@ -605,15 +605,15 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		});
 		expect(
 			queryClient.getQueryData(
-				helmorQueryKeys.workspacePr(generatedWorkspaceId),
+				helmorQueryKeys.workspaceChangeRequest(generatedWorkspaceId),
 			),
 		).toBeNull();
 		expect(
 			queryClient.getQueryData(
-				helmorQueryKeys.workspacePrActionStatus(generatedWorkspaceId),
+				helmorQueryKeys.workspaceForgeActionStatus(generatedWorkspaceId),
 			),
 		).toMatchObject({
-			pr: null,
+			changeRequest: null,
 			remoteState: "noPr",
 			deployments: [],
 			checks: [],
@@ -890,12 +890,12 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		).toBeUndefined();
 		expect(
 			queryClient.getQueryData(
-				helmorQueryKeys.workspacePr(generatedWorkspaceId),
+				helmorQueryKeys.workspaceChangeRequest(generatedWorkspaceId),
 			),
 		).toBeUndefined();
 		expect(
 			queryClient.getQueryData(
-				helmorQueryKeys.workspacePrActionStatus(generatedWorkspaceId),
+				helmorQueryKeys.workspaceForgeActionStatus(generatedWorkspaceId),
 			),
 		).toBeUndefined();
 		expect(

@@ -94,11 +94,12 @@ import {
 	helmorQueryKeys,
 	helmorQueryPersister,
 	sessionThreadMessagesQueryOptions,
+	workspaceChangeRequestQueryOptions,
 	workspaceDetailQueryOptions,
+	workspaceForgeActionStatusQueryOptions,
+	workspaceForgeQueryOptions,
 	workspaceGitActionStatusQueryOptions,
 	workspaceGroupsQueryOptions,
-	workspacePrActionStatusQueryOptions,
-	workspacePrQueryOptions,
 	workspaceSessionsQueryOptions,
 } from "./lib/query-client";
 import {
@@ -679,25 +680,30 @@ function AppShell({
 		return () => window.removeEventListener("keydown", handler, true);
 	}, [workspaceRootPath]);
 
-	// Persistent PR state for the current workspace's branch. Drives the
-	// commit button's resting mode and the "Git · PR #xxx" header badge.
-	// No `initializing` gate: the Rust impls short-circuit to the
-	// canonical "fresh workspace" answers (no PR, clean git tree) so the
-	// Phase 1 paint already matches what the Phase 2 refetch returns.
-	const workspacePrQuery = useQuery({
-		...workspacePrQueryOptions(selectedWorkspaceId ?? "__none__"),
-		enabled: isIdentityConnected && selectedWorkspaceId !== null,
+	const workspaceForgeQuery = useQuery({
+		...workspaceForgeQueryOptions(selectedWorkspaceId ?? "__none__"),
+		enabled: selectedWorkspaceId !== null,
 	});
-	const workspacePrInfo = workspacePrQuery.data ?? null;
+	const workspaceForge = workspaceForgeQuery.data ?? null;
+	const workspaceForgeProvider = workspaceForge?.provider ?? "unknown";
+	const workspaceForgeQueriesEnabled =
+		selectedWorkspaceId !== null &&
+		(workspaceForgeProvider === "gitlab" || isIdentityConnected);
 
-	// PR action status (mergeable, reviewDecision, checks) and local git
-	// status (uncommittedCount, conflictCount). These drive the commit
-	// button's mode derivation — shared cache with inspector's actions.tsx.
-	const workspacePrActionStatusQuery = useQuery({
-		...workspacePrActionStatusQueryOptions(selectedWorkspaceId ?? "__none__"),
-		enabled: isIdentityConnected && selectedWorkspaceId !== null,
+	const workspaceChangeRequestQuery = useQuery({
+		...workspaceChangeRequestQueryOptions(selectedWorkspaceId ?? "__none__"),
+		enabled: workspaceForgeQueriesEnabled,
 	});
-	const workspacePrActionStatus = workspacePrActionStatusQuery.data ?? null;
+	const workspaceChangeRequest = workspaceChangeRequestQuery.data ?? null;
+
+	const workspaceForgeActionStatusQuery = useQuery({
+		...workspaceForgeActionStatusQueryOptions(
+			selectedWorkspaceId ?? "__none__",
+		),
+		enabled: workspaceForgeQueriesEnabled,
+	});
+	const workspaceForgeActionStatus =
+		workspaceForgeActionStatusQuery.data ?? null;
 
 	const workspaceGitActionStatusQuery = useQuery({
 		...workspaceGitActionStatusQueryOptions(selectedWorkspaceId ?? "__none__"),
@@ -713,10 +719,10 @@ function AppShell({
 		selectedWorkspaceDetailQuery.data?.manualStatus ?? null;
 	const selectedWorkspaceState =
 		selectedWorkspaceDetailQuery.data?.state ?? null;
-	const prStatusSyncRef = useRef<string | null>(null);
+	const changeRequestStatusSyncRef = useRef<string | null>(null);
 	useEffect(() => {
-		if (!selectedWorkspaceId || !workspacePrInfo) {
-			prStatusSyncRef.current = null;
+		if (!selectedWorkspaceId || !workspaceChangeRequest) {
+			changeRequestStatusSyncRef.current = null;
 			return;
 		}
 		if (
@@ -727,11 +733,11 @@ function AppShell({
 		}
 
 		let targetStatus: DerivedStatus | null = null;
-		if (workspacePrInfo.isMerged) {
+		if (workspaceChangeRequest.isMerged) {
 			targetStatus = "done";
-		} else if (workspacePrInfo.state === "OPEN") {
+		} else if (workspaceChangeRequest.state === "OPEN") {
 			targetStatus = "review";
-		} else if (workspacePrInfo.state === "CLOSED") {
+		} else if (workspaceChangeRequest.state === "CLOSED") {
 			targetStatus = "canceled";
 		}
 
@@ -739,8 +745,8 @@ function AppShell({
 		if (selectedWorkspaceManualStatus === targetStatus) return;
 
 		const syncKey = `${selectedWorkspaceId}:${targetStatus}`;
-		if (prStatusSyncRef.current === syncKey) return;
-		prStatusSyncRef.current = syncKey;
+		if (changeRequestStatusSyncRef.current === syncKey) return;
+		changeRequestStatusSyncRef.current = syncKey;
 
 		void (async () => {
 			try {
@@ -754,12 +760,12 @@ function AppShell({
 					}),
 				]);
 			} catch (error) {
-				console.error("[prStatusSync] Failed:", error);
+				console.error("[changeRequestStatusSync] Failed:", error);
 			}
 		})();
 	}, [
 		selectedWorkspaceId,
-		workspacePrInfo,
+		workspaceChangeRequest,
 		selectedWorkspaceManualStatus,
 		selectedWorkspaceState,
 		queryClient,
@@ -1376,8 +1382,9 @@ function AppShell({
 		selectedWorkspaceIdRef,
 		selectedRepoId: selectedWorkspaceDetailQuery.data?.repoId ?? null,
 		workspaceManualStatus: selectedWorkspaceManualStatus,
-		workspacePrInfo,
-		workspacePrActionStatus,
+		changeRequest: workspaceChangeRequest,
+		forgeDetection: workspaceForge,
+		forgeActionStatus: workspaceForgeActionStatus,
 		workspaceGitActionStatus,
 		completedSessionIds: settledSessionIds,
 		interactionRequiredSessionIds,
@@ -2147,7 +2154,7 @@ function AppShell({
 													interactionRequiredSessionIds
 												}
 												onSessionCompleted={handleSessionCompleted}
-												workspacePrInfo={workspacePrInfo}
+												workspaceChangeRequest={workspaceChangeRequest}
 												pendingPromptForSession={pendingPromptForSession}
 												onPendingPromptConsumed={handlePendingPromptConsumed}
 												pendingInsertRequests={pendingComposerInserts}
@@ -2333,7 +2340,7 @@ function AppShell({
 										}
 										commitButtonMode={commitButtonMode}
 										commitButtonState={commitButtonState}
-										prInfo={workspacePrInfo}
+										changeRequest={workspaceChangeRequest}
 										onOpenSettings={handleOpenSettings}
 									/>
 								</aside>
