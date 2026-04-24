@@ -2037,7 +2037,7 @@ function AppShell({
 												<div className="absolute right-[12px] top-[6px] z-20 flex items-center gap-1">
 													<AppUpdateButton
 														status={appUpdateStatus}
-														className="text-muted-foreground hover:text-foreground"
+														style="ready"
 													/>
 													<Button
 														aria-label="Collapse sidebar"
@@ -2176,7 +2176,7 @@ function AppShell({
 															<div className="w-[52px] shrink-0" />
 															<AppUpdateButton
 																status={appUpdateStatus}
-																className="text-muted-foreground hover:text-foreground"
+																style="ready"
 															/>
 															<Button
 																aria-label="Expand sidebar"
