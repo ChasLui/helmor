@@ -15,7 +15,7 @@ use serde_json::Value;
 
 use super::blocks::parse_codex_todolist_items;
 use crate::pipeline::types::{
-    ExtendedMessagePart, IntermediateMessage, MessagePart, MessageRole, MessageStatus,
+    ExtendedMessagePart, ImageSource, IntermediateMessage, MessagePart, MessageRole, MessageStatus,
     NoticeSeverity, PlanAllowedPrompt, ThreadMessageLike,
 };
 
@@ -59,6 +59,7 @@ pub(super) fn render_item_completed(
         Some("mcp_tool_call") => render_mcp_tool_call(msg, item, result),
         Some("plan") => render_plan(msg, item, result),
         Some("context_compaction") => render_context_compaction(msg, item, result),
+        Some("image_generation") => render_image_generation(msg, item, result),
         _ => {}
     }
 }
@@ -333,6 +334,60 @@ fn render_plan(msg: &IntermediateMessage, item: &Value, result: &mut Vec<ThreadM
             plan: Some(text.to_string()),
             plan_file_path: None,
             allowed_prompts: Vec::<PlanAllowedPrompt>::new(),
+        })],
+        status: Some(MessageStatus {
+            status_type: "complete".to_string(),
+            reason: Some("stop".to_string()),
+        }),
+        streaming: None,
+    });
+}
+
+fn render_image_generation(
+    msg: &IntermediateMessage,
+    item: &Value,
+    result: &mut Vec<ThreadMessageLike>,
+) {
+    let source = if let Some(path) = item
+        .get("saved_path")
+        .or_else(|| item.get("savedPath"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+    {
+        ImageSource::File {
+            path: path.to_string(),
+        }
+    } else if let Some(raw_result) = item.get("result").and_then(Value::as_str) {
+        let result_value = raw_result.trim();
+        if result_value.is_empty() {
+            return;
+        }
+
+        if result_value.starts_with("data:image/") || result_value.starts_with("http") {
+            ImageSource::Url {
+                url: result_value.to_string(),
+            }
+        } else {
+            ImageSource::Base64 {
+                data: result_value.to_string(),
+            }
+        }
+    } else {
+        return;
+    };
+    let media_type = match &source {
+        ImageSource::Base64 { .. } => Some("image/png".to_string()),
+        ImageSource::Url { .. } | ImageSource::File { .. } => None,
+    };
+
+    result.push(ThreadMessageLike {
+        role: MessageRole::Assistant,
+        id: Some(msg.id.clone()),
+        created_at: Some(msg.created_at.clone()),
+        content: vec![ExtendedMessagePart::Basic(MessagePart::Image {
+            id: format!("{}:blk:0", msg.id),
+            source,
+            media_type,
         })],
         status: Some(MessageStatus {
             status_type: "complete".to_string(),

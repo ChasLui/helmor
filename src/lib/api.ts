@@ -1750,7 +1750,8 @@ export type TodoListPart = {
 };
 export type ImageSource =
 	| { kind: "base64"; data: string }
-	| { kind: "url"; url: string };
+	| { kind: "url"; url: string }
+	| { kind: "file"; path: string };
 export type ImagePart = {
 	type: "image";
 	id: string;
@@ -1904,6 +1905,14 @@ export async function savePastedImage(
 	mediaType: string,
 ): Promise<string> {
 	return invoke<string>("save_pasted_image", { data, mediaType });
+}
+
+export async function showImageInFinder(path: string): Promise<void> {
+	await invoke("show_image_in_finder", { path });
+}
+
+export async function copyImageToClipboard(path: string): Promise<void> {
+	await invoke("copy_image_to_clipboard", { path });
 }
 
 /**

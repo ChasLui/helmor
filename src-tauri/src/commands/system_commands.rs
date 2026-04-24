@@ -254,6 +254,91 @@ pub async fn save_pasted_image(data: String, media_type: String) -> CmdResult<St
     .await
 }
 
+#[tauri::command]
+pub async fn show_image_in_finder(path: String) -> CmdResult<()> {
+    run_blocking(move || {
+        let source = std::path::PathBuf::from(path);
+        if !source.is_file() {
+            return Err(anyhow::anyhow!(
+                "Image file not found: {}",
+                source.display()
+            ));
+        }
+        reveal_file_in_finder(&source).context("Failed to show image in Finder")
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn copy_image_to_clipboard(path: String) -> CmdResult<()> {
+    run_blocking(move || {
+        let source = std::path::PathBuf::from(path);
+        if !source.is_file() {
+            return Err(anyhow::anyhow!(
+                "Image file not found: {}",
+                source.display()
+            ));
+        }
+        copy_image_file_to_clipboard(&source).context("Failed to copy image")
+    })
+    .await
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_file_in_finder(path: &std::path::Path) -> anyhow::Result<()> {
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .context("open command failed")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reveal_file_in_finder(_path: &std::path::Path) -> anyhow::Result<()> {
+    anyhow::bail!("Showing images in Finder is only supported on macOS")
+}
+
+#[cfg(target_os = "macos")]
+fn copy_image_file_to_clipboard(path: &std::path::Path) -> anyhow::Result<()> {
+    let class_name = match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "JPEG picture",
+        Some("gif") => "GIF picture",
+        _ => "«class PNGf»",
+    };
+    let script = format!(
+        "set the clipboard to (read (POSIX file \"{}\") as {class_name})",
+        applescript_escape(&path.to_string_lossy())
+    );
+    let output = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .context("osascript command failed")?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn copy_image_file_to_clipboard(_path: &std::path::Path) -> anyhow::Result<()> {
+    anyhow::bail!("Copying images is only supported on macOS")
+}
+
+fn applescript_escape(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn base64_decode(input: &str) -> anyhow::Result<Vec<u8>> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD

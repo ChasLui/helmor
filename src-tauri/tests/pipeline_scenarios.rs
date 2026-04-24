@@ -1193,6 +1193,45 @@ fn codex_web_search_with_action_passes_through() {
 }
 
 #[test]
+fn codex_image_generation_renders_as_image() {
+    let parsed = json!({
+        "type": "item.completed",
+        "item": {
+            "id": "img_1",
+            "type": "image_generation",
+            "status": "completed",
+            "revised_prompt": "A small architecture diagram",
+            "result": "iVBORw0KGgo="
+        }
+    });
+    let msgs = vec![make_record(
+        "img1",
+        "assistant",
+        &serde_json::to_string(&parsed).unwrap(),
+    )];
+    assert_yaml_snapshot!(run_normalized(msgs));
+}
+
+#[test]
+fn codex_image_generation_saved_path_renders_as_file_image() {
+    let parsed = json!({
+        "type": "item.completed",
+        "item": {
+            "id": "img_2",
+            "type": "image_generation",
+            "status": "completed",
+            "saved_path": "/tmp/helmor/generated-images/session/img_2.png"
+        }
+    });
+    let msgs = vec![make_record(
+        "img2",
+        "assistant",
+        &serde_json::to_string(&parsed).unwrap(),
+    )];
+    assert_yaml_snapshot!(run_normalized(msgs));
+}
+
+#[test]
 fn codex_mcp_tool_call_renders_as_tool_call() {
     let parsed = json!({
         "type": "item.completed",

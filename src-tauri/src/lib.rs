@@ -5,6 +5,7 @@ pub mod data_dir;
 pub mod error;
 pub mod forge;
 pub mod git;
+pub mod image_store;
 mod import;
 pub mod logging;
 pub mod mcp;
@@ -268,6 +269,8 @@ pub fn run() {
             commands::conductor_commands::list_conductor_workspaces,
             commands::conductor_commands::import_conductor_workspaces,
             commands::system_commands::save_pasted_image,
+            commands::system_commands::show_image_in_finder,
+            commands::system_commands::copy_image_to_clipboard,
             commands::system_commands::request_quit,
             commands::system_commands::dev_reset_all_data,
             commands::settings_commands::update_app_settings,

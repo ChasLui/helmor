@@ -61,6 +61,10 @@ pub(super) fn persist_turn_message(
     // Use the pre-assigned ID from the turn so streaming and historical
     // message IDs are the same UUID.
     let msg_id = turn.id.clone();
+    let content = crate::image_store::prepare_turn_content_for_persist(
+        &ctx.helmor_session_id,
+        &turn.content_json,
+    )?;
 
     conn.execute(
         r#"
@@ -68,13 +72,7 @@ pub(super) fn persist_turn_message(
               id, session_id, role, content, created_at, sent_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)
             "#,
-        params![
-            msg_id,
-            ctx.helmor_session_id,
-            turn.role,
-            turn.content_json,
-            now
-        ],
+        params![msg_id, ctx.helmor_session_id, turn.role, content, now],
     )?;
     Ok(msg_id)
 }

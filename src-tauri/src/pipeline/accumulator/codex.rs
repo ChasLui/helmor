@@ -291,6 +291,9 @@ fn dispatch_item(acc: &mut StreamAccumulator, raw_line: &str, value: &Value, per
         Some("context_compaction") => {
             handle_context_compaction_item(acc, raw_line, item, item_id.as_deref(), persist);
         }
+        Some("image_generation") => {
+            handle_image_generation(acc, raw_line, item, item_id.as_deref(), persist);
+        }
         Some("error") => {
             handle_error_item(acc, raw_line, item, persist);
         }
@@ -852,6 +855,37 @@ fn handle_context_compaction_item(
     }
 }
 
+fn handle_image_generation(
+    acc: &mut StreamAccumulator,
+    raw_line: &str,
+    item: &Value,
+    item_id: Option<&str>,
+    persist: bool,
+) {
+    let envelope = serde_json::json!({
+        "type": "item.completed",
+        "item": item,
+    });
+    let s = serde_json::to_string(&envelope).unwrap_or_default();
+    let image_id = item_id
+        .map(|id| format!("codex-image:{id}"))
+        .unwrap_or_else(|| format!("codex-image:{}", acc.line_count));
+    acc.collect_or_replace(
+        &s,
+        &envelope,
+        MessageRole::Assistant,
+        Some(image_id.clone()),
+    );
+
+    if persist {
+        acc.turns.push(CollectedTurn {
+            id: image_id,
+            role: MessageRole::Assistant,
+            content_json: raw_line.to_string(),
+        });
+    }
+}
+
 pub(super) fn handle_thread_compacted(acc: &mut StreamAccumulator, _raw_line: &str, value: &Value) {
     let synthetic = serde_json::json!({
         "type": "system",
@@ -1026,6 +1060,7 @@ fn normalize_item_type(t: &str) -> &str {
         "reasoning" => "reasoning",
         "plan" => "plan",
         "contextCompaction" | "context_compaction" => "context_compaction",
+        "imageGeneration" | "image_generation" => "image_generation",
         "error" => "error",
         other => other,
     }
@@ -1040,6 +1075,7 @@ fn normalize_field_name(name: &str) -> String {
         "processId" => "process_id".to_string(),
         "commandActions" => "command_actions".to_string(),
         "memoryCitation" => "memory_citation".to_string(),
+        "savedPath" => "saved_path".to_string(),
         _ => name.to_string(),
     }
 }
