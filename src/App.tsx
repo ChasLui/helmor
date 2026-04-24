@@ -2034,11 +2034,8 @@ function AppShell({
 														pushWorkspaceToast={pushWorkspaceToast}
 													/>
 												</div>
-												<div className="absolute right-[12px] top-[6px] z-20 flex items-center gap-1">
-													<AppUpdateButton
-														status={appUpdateStatus}
-														style="ready"
-													/>
+												<div className="absolute right-[12px] top-[6px] z-20 flex items-center gap-[2px]">
+													<AppUpdateButton status={appUpdateStatus} />
 													<Button
 														aria-label="Collapse sidebar"
 														onClick={() => setSidebarCollapsed(true)}
@@ -2174,22 +2171,21 @@ function AppShell({
 														<>
 															{/* Spacer to avoid macOS traffic lights */}
 															<div className="w-[52px] shrink-0" />
-															<AppUpdateButton
-																status={appUpdateStatus}
-																style="ready"
-															/>
-															<Button
-																aria-label="Expand sidebar"
-																onClick={() => setSidebarCollapsed(false)}
-																variant="ghost"
-																size="icon-xs"
-																className="text-muted-foreground hover:text-foreground"
-															>
-																<PanelLeftOpen
-																	className="size-4"
-																	strokeWidth={1.8}
-																/>
-															</Button>
+															<div className="flex items-center gap-[2px]">
+																<AppUpdateButton status={appUpdateStatus} />
+																<Button
+																	aria-label="Expand sidebar"
+																	onClick={() => setSidebarCollapsed(false)}
+																	variant="ghost"
+																	size="icon-xs"
+																	className="text-muted-foreground hover:text-foreground"
+																>
+																	<PanelLeftOpen
+																		className="size-4"
+																		strokeWidth={1.8}
+																	/>
+																</Button>
+															</div>
 														</>
 													) : undefined
 												}
