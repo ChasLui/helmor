@@ -1167,13 +1167,15 @@ export function useConversationStreaming({
 				typeof currentSession?.title === "string"
 					? currentSession.title
 					: undefined;
+			const isCompactCommand = trimmedPrompt === "/compact";
 			const isFirstUserMessage =
 				(currentThread ?? []).every((message) => message.role !== "user") &&
 				(currentTitle == null || currentTitle === "Untitled");
 			const repoPreferences = repoId ? await loadRepoPreferences(repoId) : null;
-			const finalPrompt = isFirstUserMessage
-				? prependGeneralPreferencePrompt(trimmedPrompt, repoPreferences)
-				: trimmedPrompt;
+			const finalPrompt =
+				isFirstUserMessage && !isCompactCommand
+					? prependGeneralPreferencePrompt(trimmedPrompt, repoPreferences)
+					: trimmedPrompt;
 			const now = new Date().toISOString();
 			const userMessageId = crypto.randomUUID();
 			const optimisticUserMessage = createLiveThreadMessage({
@@ -1184,7 +1186,7 @@ export function useConversationStreaming({
 				files: filePaths,
 			});
 			let titleSeed: string | null = null;
-			if (isFirstUserMessage) {
+			if (isFirstUserMessage && !isCompactCommand) {
 				titleSeed = buildTitleSeed(trimmedPrompt);
 				seedSessionTitle(targetSessionId, targetWorkspaceId, titleSeed);
 				void renameSession(targetSessionId, titleSeed).catch((error) => {
