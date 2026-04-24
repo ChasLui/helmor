@@ -306,6 +306,7 @@ export type RestoreWorkspaceResponse = {
 	 * instead. The frontend uses this to surface an informational toast so
 	 * the rename never happens silently. */
 	branchRename: { original: string; actual: string } | null;
+	restoredFromTargetBranch: string | null;
 };
 
 export type ArchiveWorkspaceResponse = {
@@ -633,6 +634,7 @@ export type SlashCommandEntry = {
 	name: string;
 	description: string;
 	argumentHint?: string | null;
+	providers?: AgentProvider[] | null;
 	/**
 	 * - `builtin` / `skill`: command is forwarded to the agent SDK as text.
 	 * - `client-action`: selecting the entry runs a host-app handler instead
