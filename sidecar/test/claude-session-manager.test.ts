@@ -36,6 +36,7 @@ type MockQueryResult = AsyncIterable<unknown> & {
 			argumentHint?: string;
 		}>
 	>;
+	getContextUsage?: () => Promise<unknown>;
 	close?: () => void;
 };
 
@@ -228,11 +229,238 @@ describe("ClaudeSessionManager.sendMessage", () => {
 			emitter,
 		);
 
-		// One event per SDK message plus a trailing `end`
-		expect(captured).toHaveLength(sdkMessages.length + 1);
+		// One passthrough per SDK message, plus an optional
+		// `contextUsageUpdated` (emitted when the terminal result carries
+		// usage data — most fixtures do), plus a trailing `end`.
+		const withoutCtxUsage = captured.filter(
+			(e) => e.type !== "contextUsageUpdated",
+		);
+		expect(withoutCtxUsage).toHaveLength(sdkMessages.length + 1);
 
 		const last = captured[captured.length - 1];
 		expect(last).toEqual({ id: "REQ-1", type: "end" });
+	});
+
+	test("emits contextUsageUpdated from the terminal result's usage + modelUsage", async () => {
+		const sdkMessages = [
+			{
+				type: "result",
+				subtype: "success",
+				is_error: false,
+				session_id: "sdk-sess-1",
+				usage: {
+					input_tokens: 6,
+					cache_creation_input_tokens: 12_267,
+					cache_read_input_tokens: 13_101,
+					output_tokens: 10,
+				},
+				modelUsage: {
+					"claude-opus-4-7[1m]": { contextWindow: 1_000_000 },
+				},
+			},
+		];
+		mockQueryImpl = () => asyncIterableFrom(sdkMessages);
+
+		await manager.sendMessage(
+			"REQ-ctx",
+			{
+				sessionId: "helmor-sess-ctx",
+				prompt: "hi",
+				model: undefined,
+				cwd: undefined,
+				resume: undefined,
+				permissionMode: undefined,
+				effortLevel: undefined,
+				fastMode: undefined,
+			},
+			emitter,
+		);
+
+		const ctxUsage = captured.find((e) => e.type === "contextUsageUpdated");
+		expect(ctxUsage).toBeDefined();
+		expect(ctxUsage?.id).toBe("REQ-ctx");
+		expect(ctxUsage?.sessionId).toBe("helmor-sess-ctx");
+		const meta = JSON.parse(ctxUsage?.meta as string);
+		expect(meta).toEqual({
+			usedTokens: 25_384,
+			maxTokens: 1_000_000,
+			// 25384 / 1_000_000 * 100 rounded to 2 decimals.
+			percentage: 2.54,
+		});
+	});
+
+	test("getContextUsage fast path reuses the live Query and returns rich meta", async () => {
+		// Feed a terminal result so sendMessage registers the session into
+		// `manager.sessions` before we call getContextUsage.
+		const terminalResult = {
+			type: "result",
+			subtype: "success",
+			is_error: false,
+			session_id: "sdk-sess-rich",
+			usage: { input_tokens: 100, output_tokens: 10 },
+			modelUsage: { "claude-opus-4-7": { contextWindow: 200_000 } },
+		};
+		// Use a never-ending stream so the session stays live — we'll call
+		// getContextUsage before the stream completes.
+		let resolveStream: (v: unknown) => void = () => {};
+		const streamPromise = new Promise((resolve) => {
+			resolveStream = resolve;
+		});
+		const liveIterable: AsyncIterable<unknown> = {
+			[Symbol.asyncIterator]: () => ({
+				async next() {
+					await streamPromise;
+					return { value: terminalResult, done: false };
+				},
+			}),
+		};
+
+		let getContextUsageCalls = 0;
+		mockQueryImpl = () =>
+			Object.assign(liveIterable, {
+				async getContextUsage() {
+					getContextUsageCalls += 1;
+					return {
+						totalTokens: 1500,
+						maxTokens: 200_000,
+						percentage: 0.75,
+						isAutoCompactEnabled: true,
+						categories: [
+							{ name: "Messages", tokens: 800, color: "#000" },
+							{ name: "Free space", tokens: 198_500, color: "#fff" },
+						],
+					};
+				},
+				close: () => undefined,
+			});
+
+		// Kick off sendMessage so `manager.sessions` has an entry;
+		// don't await — stream is intentionally never-ending.
+		void manager.sendMessage(
+			"REQ-live",
+			{
+				sessionId: "helmor-live",
+				prompt: "hi",
+				model: undefined,
+				cwd: undefined,
+				resume: undefined,
+				permissionMode: undefined,
+				effortLevel: undefined,
+				fastMode: undefined,
+			},
+			emitter,
+		);
+
+		// Wait a microtask so the manager registers the live session
+		// before we hit the fast path.
+		await waitForCondition(
+			// biome-ignore lint/suspicious/noExplicitAny: private for test
+			() => (manager as any).sessions.size > 0,
+			"session registered",
+		);
+
+		const json = await manager.getContextUsage({
+			helmorSessionId: "helmor-live",
+			providerSessionId: null,
+			model: "claude-opus-4-7",
+			cwd: undefined,
+		});
+		expect(getContextUsageCalls).toBe(1);
+		const meta = JSON.parse(json);
+		expect(meta).toEqual({
+			usedTokens: 1500,
+			maxTokens: 200_000,
+			percentage: 0.75,
+			isAutoCompactEnabled: true,
+			// "Free space" filtered out.
+			categories: [{ name: "Messages", tokens: 800 }],
+		});
+
+		// Let the send-message promise settle so the test tears down cleanly.
+		resolveStream(null);
+	});
+
+	test("getContextUsage slow path spawns a transient Query + returns rich meta", async () => {
+		// No live session for this helmor id — slow path kicks in. The
+		// mock query is reused for the transient spawn; `getContextUsage`
+		// resolves immediately so no real 30s timer ever fires.
+		mockQueryImpl = () =>
+			Object.assign(asyncIterableFrom<unknown>([]), {
+				async getContextUsage() {
+					return {
+						totalTokens: 42_000,
+						maxTokens: 1_000_000,
+						percentage: 4.2,
+						isAutoCompactEnabled: false,
+						categories: [],
+					};
+				},
+				close: () => undefined,
+			});
+
+		const json = await manager.getContextUsage({
+			helmorSessionId: "no-live-session",
+			providerSessionId: "provider-xyz",
+			model: "claude-opus-4-7",
+			cwd: undefined,
+		});
+
+		const meta = JSON.parse(json);
+		expect(meta.usedTokens).toBe(42_000);
+		expect(meta.maxTokens).toBe(1_000_000);
+		// Assert the transient query was configured with resume + model so
+		// the SDK loads the correct window size (we check the last recorded
+		// query() args).
+		const args = lastQueryArgs as {
+			options?: { resume?: string; model?: string };
+		};
+		expect(args.options?.resume).toBe("provider-xyz");
+		expect(args.options?.model).toBe("claude-opus-4-7");
+	});
+
+	test("emits contextUsageUpdated for an error-result turn too (same usage shape)", async () => {
+		// Regression: the previous gate filtered out error results via
+		// `isTerminalSuccessResult`, so aborted-by-limit turns lost their
+		// usage update even though the consumed context was real.
+		const sdkMessages = [
+			{
+				type: "result",
+				subtype: "error_max_turns",
+				is_error: true,
+				session_id: "sdk-sess-err",
+				usage: {
+					input_tokens: 5000,
+					cache_creation_input_tokens: 0,
+					cache_read_input_tokens: 0,
+					output_tokens: 100,
+				},
+				modelUsage: {
+					"claude-sonnet-4-5": { contextWindow: 200_000 },
+				},
+			},
+		];
+		mockQueryImpl = () => asyncIterableFrom(sdkMessages);
+
+		await manager.sendMessage(
+			"REQ-err",
+			{
+				sessionId: "helmor-sess-err",
+				prompt: "hi",
+				model: undefined,
+				cwd: undefined,
+				resume: undefined,
+				permissionMode: undefined,
+				effortLevel: undefined,
+				fastMode: undefined,
+			},
+			emitter,
+		);
+
+		const ctxUsage = captured.find((e) => e.type === "contextUsageUpdated");
+		expect(ctxUsage).toBeDefined();
+		const meta = JSON.parse(ctxUsage?.meta as string);
+		expect(meta.usedTokens).toBe(5100);
+		expect(meta.maxTokens).toBe(200_000);
 	});
 
 	test("supportsFastMode comes from the overrides table, not the SDK", async () => {
@@ -391,10 +619,13 @@ describe("ClaudeSessionManager.sendMessage", () => {
 			emitter,
 		);
 
-		// The passthrough events (everything except the final `end`) must
-		// still carry the SDK's session_id verbatim — that's how the Rust
-		// side learns the provider_session_id to persist.
-		const passthroughs = captured.slice(0, -1);
+		// The passthrough events must carry the SDK's snake_case session_id
+		// verbatim — that's how the Rust side learns the provider_session_id
+		// to persist. Skip the terminal `end` and any `contextUsageUpdated`
+		// (our derived event, which carries a camelCase sessionId instead).
+		const passthroughs = captured.filter(
+			(e) => e.type !== "end" && e.type !== "contextUsageUpdated",
+		);
 		for (const event of passthroughs) {
 			expect(event.session_id).toBe(expectedSessionId);
 		}
@@ -1245,9 +1476,15 @@ describe("Claude full-fixture round-trip", () => {
 			);
 
 			// The sidecar forwards every SDK event up to the first successful
-			// terminal result, then emits exactly one terminal `end`.
-			expect(captured).toHaveLength(expectedMessages.length + 1);
-			expect(captured[captured.length - 1]).toEqual({
+			// terminal result, optionally emits a derived `contextUsageUpdated`
+			// just before `end` (when the result carries usage data), then
+			// emits exactly one terminal `end`. Strip the derived event for
+			// the strict passthrough count.
+			const passthroughs = captured.filter(
+				(e) => e.type !== "contextUsageUpdated",
+			);
+			expect(passthroughs).toHaveLength(expectedMessages.length + 1);
+			expect(passthroughs[passthroughs.length - 1]).toEqual({
 				id: `REQ-${fixture}`,
 				type: "end",
 			});
@@ -1261,7 +1498,7 @@ describe("Claude full-fixture round-trip", () => {
 			// source event one-for-one (in order). This is the strict
 			// "no transformation, no reorder, no drop" guarantee.
 			for (let i = 0; i < expectedMessages.length; i++) {
-				expect(captured[i]?.type).toBe(expectedMessages[i]?.type);
+				expect(passthroughs[i]?.type).toBe(expectedMessages[i]?.type);
 			}
 		});
 	}
