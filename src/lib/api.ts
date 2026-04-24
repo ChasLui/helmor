@@ -634,6 +634,7 @@ export type SlashCommandEntry = {
 	name: string;
 	description: string;
 	argumentHint?: string | null;
+	providers?: AgentProvider[] | null;
 	/**
 	 * - `builtin` / `skill`: command is forwarded to the agent SDK as text.
 	 * - `client-action`: selecting the entry runs a host-app handler instead

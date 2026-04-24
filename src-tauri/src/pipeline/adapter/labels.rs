@@ -200,6 +200,22 @@ pub(super) fn build_system_notice(parsed: Option<&Value>, msg_id: &str) -> Optio
             })
         }
         "compact_boundary" => Some(build_compact_boundary_notice(parsed, msg_id)),
+        "codex_compacting" => Some(MessagePart::SystemNotice {
+            id: notice_part_id(msg_id),
+            severity: NoticeSeverity::Info,
+            label: "Compacting context".to_string(),
+            body: None,
+        }),
+        "codex_compacted" => Some(MessagePart::SystemNotice {
+            id: notice_part_id(msg_id),
+            severity: NoticeSeverity::Info,
+            label: "Context compacted".to_string(),
+            body: parsed
+                .get("summary")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string),
+        }),
         "api_retry" => Some(build_api_retry_notice(parsed, msg_id)),
         _ => None,
     }

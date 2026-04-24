@@ -462,6 +462,10 @@ impl StreamAccumulator {
                 self.codex_turn_started_at = Some(now_ms());
                 PushOutcome::NoOp
             }
+            Some("thread/compacted") => {
+                codex::handle_thread_compacted(self, raw_line, value);
+                PushOutcome::Finalized
+            }
             Some("thread/started") => {
                 if let Some(tid) = value
                     .get("thread")
