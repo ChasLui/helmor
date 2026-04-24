@@ -40,6 +40,7 @@ import { WorkspacesSidebarContainer } from "@/features/navigation/container";
 import { seedNewSessionInCache } from "@/features/panel/session-cache";
 import { useConfirmSessionClose } from "@/features/panel/use-confirm-session-close";
 import { SettingsButton, SettingsDialog } from "@/features/settings";
+import { AppUpdateButton } from "@/features/updater/app-update-button";
 import { useAppUpdater } from "@/features/updater/use-app-updater";
 import {
 	hasSecondaryModifier,
@@ -600,7 +601,7 @@ function AppShell({
 	}, [showOnboarding]);
 
 	const { settings: appSettings } = useSettings();
-	useAppUpdater();
+	const appUpdateStatus = useAppUpdater();
 	useDockUnreadBadge();
 	useEnsureDefaultModel();
 	const notify = useOsNotifications(appSettings);
@@ -2053,18 +2054,21 @@ function AppShell({
 														pushWorkspaceToast={pushWorkspaceToast}
 													/>
 												</div>
-												<Button
-													aria-label="Collapse sidebar"
-													onClick={() => setSidebarCollapsed(true)}
-													variant="ghost"
-													size="icon-xs"
-													className="absolute right-[12px] top-[6px] z-20 text-muted-foreground hover:text-foreground"
-												>
-													<PanelLeftClose
-														className="size-4"
-														strokeWidth={1.8}
-													/>
-												</Button>
+												<div className="absolute right-[12px] top-[6px] z-20 flex items-center gap-[2px]">
+													<AppUpdateButton status={appUpdateStatus} />
+													<Button
+														aria-label="Collapse sidebar"
+														onClick={() => setSidebarCollapsed(true)}
+														variant="ghost"
+														size="icon-xs"
+														className="text-muted-foreground hover:text-foreground"
+													>
+														<PanelLeftClose
+															className="size-4"
+															strokeWidth={1.8}
+														/>
+													</Button>
+												</div>
 												<div className="flex shrink-0 items-center justify-between px-3 pb-3 pt-1">
 													<SettingsButton onClick={handleOpenSettings} />
 													{githubIdentityState.status === "connected" ? (
@@ -2188,18 +2192,21 @@ function AppShell({
 														<>
 															{/* Spacer to avoid macOS traffic lights */}
 															<div className="w-[52px] shrink-0" />
-															<Button
-																aria-label="Expand sidebar"
-																onClick={() => setSidebarCollapsed(false)}
-																variant="ghost"
-																size="icon-xs"
-																className="text-muted-foreground hover:text-foreground"
-															>
-																<PanelLeftOpen
-																	className="size-4"
-																	strokeWidth={1.8}
-																/>
-															</Button>
+															<div className="flex items-center gap-[2px]">
+																<AppUpdateButton status={appUpdateStatus} />
+																<Button
+																	aria-label="Expand sidebar"
+																	onClick={() => setSidebarCollapsed(false)}
+																	variant="ghost"
+																	size="icon-xs"
+																	className="text-muted-foreground hover:text-foreground"
+																>
+																	<PanelLeftOpen
+																		className="size-4"
+																		strokeWidth={1.8}
+																	/>
+																</Button>
+															</div>
 														</>
 													) : undefined
 												}
