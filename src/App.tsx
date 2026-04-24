@@ -6,6 +6,7 @@ import {
 	Check,
 	ChevronDown,
 	CircleAlertIcon,
+	FolderOpen,
 	PanelLeftClose,
 	PanelLeftOpen,
 } from "lucide-react";
@@ -39,6 +40,7 @@ import { WorkspacesSidebarContainer } from "@/features/navigation/container";
 import { seedNewSessionInCache } from "@/features/panel/session-cache";
 import { useConfirmSessionClose } from "@/features/panel/use-confirm-session-close";
 import { SettingsButton, SettingsDialog } from "@/features/settings";
+import { AppUpdateButton } from "@/features/updater/app-update-button";
 import { useAppUpdater } from "@/features/updater/use-app-updater";
 import {
 	hasSecondaryModifier,
@@ -72,6 +74,7 @@ import {
 	markSessionRead,
 	markSessionUnread,
 	openWorkspaceInEditor,
+	openWorkspaceInFinder,
 	prewarmSlashCommandsForWorkspace,
 	setWorkspaceManualStatus,
 	triggerWorkspaceFetch,
@@ -435,6 +438,12 @@ function AppShell({
 	const [settledSessionIds, setSettledSessionIds] = useState<Set<string>>(
 		() => new Set(),
 	);
+	// Sessions that terminated via abort (stop stream) rather than normal
+	// completion. Used by the commit lifecycle to return the button to idle
+	// when the user aborts an action session (e.g. Create PR).
+	const [abortedSessionIds, setAbortedSessionIds] = useState<Set<string>>(
+		() => new Set(),
+	);
 	const [interactionRequiredSessions, setInteractionRequiredSessions] =
 		useState<Map<string, string>>(() => new Map());
 	const interactionRequiredSessionIds = useMemo(
@@ -593,7 +602,7 @@ function AppShell({
 	}, [showOnboarding]);
 
 	const { settings: appSettings } = useSettings();
-	useAppUpdater();
+	const appUpdateStatus = useAppUpdater();
 	useDockUnreadBadge();
 	useEnsureDefaultModel();
 	const notify = useOsNotifications(appSettings);
@@ -688,6 +697,7 @@ function AppShell({
 	const workspaceForgeProvider = workspaceForge?.provider ?? "unknown";
 	const workspaceForgeQueriesEnabled =
 		selectedWorkspaceId !== null &&
+		selectedWorkspaceDetail?.state !== "archived" &&
 		(workspaceForgeProvider === "gitlab" || isIdentityConnected);
 
 	const workspaceChangeRequestQuery = useQuery({
@@ -1387,6 +1397,7 @@ function AppShell({
 		forgeActionStatus: workspaceForgeActionStatus,
 		workspaceGitActionStatus,
 		completedSessionIds: settledSessionIds,
+		abortedSessionIds,
 		interactionRequiredSessionIds,
 		sendingSessionIds,
 		onSelectSession: handleSelectSession,
@@ -1435,6 +1446,15 @@ function AppShell({
 		},
 		[notify, queryClient],
 	);
+
+	const handleSessionAborted = useCallback((sessionId: string) => {
+		setAbortedSessionIds((prev) => {
+			if (prev.has(sessionId)) return prev;
+			const next = new Set(prev);
+			next.add(sessionId);
+			return next;
+		});
+	}, []);
 
 	const lastInteractionCountsRef = useRef<Map<string, number>>(new Map());
 	const handleInteractionSessionsChange = useCallback(
@@ -1527,6 +1547,7 @@ function AppShell({
 			workspace,
 			sessions,
 			session,
+			activateAdjacent: true,
 			onSessionsChanged: () => {
 				void Promise.all([
 					queryClient.invalidateQueries({
@@ -2038,18 +2059,21 @@ function AppShell({
 														pushWorkspaceToast={pushWorkspaceToast}
 													/>
 												</div>
-												<Button
-													aria-label="Collapse sidebar"
-													onClick={() => setSidebarCollapsed(true)}
-													variant="ghost"
-													size="icon-xs"
-													className="absolute right-[12px] top-[6px] z-20 text-muted-foreground hover:text-foreground"
-												>
-													<PanelLeftClose
-														className="size-4"
-														strokeWidth={1.8}
-													/>
-												</Button>
+												<div className="absolute right-[12px] top-[6px] z-20 flex items-center gap-[2px]">
+													<AppUpdateButton status={appUpdateStatus} />
+													<Button
+														aria-label="Collapse sidebar"
+														onClick={() => setSidebarCollapsed(true)}
+														variant="ghost"
+														size="icon-xs"
+														className="text-muted-foreground hover:text-foreground"
+													>
+														<PanelLeftClose
+															className="size-4"
+															strokeWidth={1.8}
+														/>
+													</Button>
+												</div>
 												<div className="flex shrink-0 items-center justify-between px-3 pb-3 pt-1">
 													<SettingsButton onClick={handleOpenSettings} />
 													{githubIdentityState.status === "connected" ? (
@@ -2155,6 +2179,7 @@ function AppShell({
 												}
 												onSessionCompleted={handleSessionCompleted}
 												workspaceChangeRequest={workspaceChangeRequest}
+												onSessionAborted={handleSessionAborted}
 												pendingPromptForSession={pendingPromptForSession}
 												onPendingPromptConsumed={handlePendingPromptConsumed}
 												pendingInsertRequests={pendingComposerInserts}
@@ -2172,18 +2197,21 @@ function AppShell({
 														<>
 															{/* Spacer to avoid macOS traffic lights */}
 															<div className="w-[52px] shrink-0" />
-															<Button
-																aria-label="Expand sidebar"
-																onClick={() => setSidebarCollapsed(false)}
-																variant="ghost"
-																size="icon-xs"
-																className="text-muted-foreground hover:text-foreground"
-															>
-																<PanelLeftOpen
-																	className="size-4"
-																	strokeWidth={1.8}
-																/>
-															</Button>
+															<div className="flex items-center gap-[2px]">
+																<AppUpdateButton status={appUpdateStatus} />
+																<Button
+																	aria-label="Expand sidebar"
+																	onClick={() => setSidebarCollapsed(false)}
+																	variant="ghost"
+																	size="icon-xs"
+																	className="text-muted-foreground hover:text-foreground"
+																>
+																	<PanelLeftOpen
+																		className="size-4"
+																		strokeWidth={1.8}
+																	/>
+																</Button>
+															</div>
 														</>
 													) : undefined
 												}
@@ -2235,6 +2263,25 @@ function AppShell({
 																	sideOffset={6}
 																	className="min-w-[11rem]"
 																>
+																	<DropdownMenuItem
+																		onClick={() => {
+																			void openWorkspaceInFinder(
+																				selectedWorkspaceId,
+																			).catch((e) =>
+																				pushWorkspaceToast(
+																					String(e),
+																					"Failed to open Finder",
+																				),
+																			);
+																		}}
+																		className="flex items-center gap-2"
+																	>
+																		<FolderOpen
+																			className="shrink-0"
+																			strokeWidth={1.8}
+																		/>
+																		<span className="flex-1">Finder</span>
+																	</DropdownMenuItem>
 																	{installedEditors.map((editor) => (
 																		<DropdownMenuItem
 																			key={editor.id}

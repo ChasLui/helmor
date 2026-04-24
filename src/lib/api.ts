@@ -378,6 +378,7 @@ export type RestoreWorkspaceResponse = {
 	 * instead. The frontend uses this to surface an informational toast so
 	 * the rename never happens silently. */
 	branchRename: { original: string; actual: string } | null;
+	restoredFromTargetBranch: string | null;
 };
 
 export type ArchiveWorkspaceResponse = {
@@ -759,6 +760,7 @@ export type SlashCommandEntry = {
 	name: string;
 	description: string;
 	argumentHint?: string | null;
+	providers?: AgentProvider[] | null;
 	/**
 	 * - `builtin` / `skill`: command is forwarded to the agent SDK as text.
 	 * - `client-action`: selecting the entry runs a host-app handler instead
@@ -1122,6 +1124,12 @@ export async function openWorkspaceInEditor(
 	editor: string,
 ): Promise<void> {
 	await invoke("open_workspace_in_editor", { workspaceId, editor });
+}
+
+export async function openWorkspaceInFinder(
+	workspaceId: string,
+): Promise<void> {
+	await invoke("open_workspace_in_finder", { workspaceId });
 }
 
 export async function readEditorFile(

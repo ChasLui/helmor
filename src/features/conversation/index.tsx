@@ -49,6 +49,7 @@ type WorkspaceConversationContainerProps = {
 	interactionRequiredSessionIds?: Set<string>;
 	onSessionCompleted?: (sessionId: string, workspaceId: string) => void;
 	workspaceChangeRequest?: ChangeRequestInfo | null;
+	onSessionAborted?: (sessionId: string, workspaceId: string) => void;
 	headerActions?: React.ReactNode;
 	headerLeading?: React.ReactNode;
 	/** Prompt queued by an external caller (e.g. the inspector Git commit
@@ -94,6 +95,7 @@ export const WorkspaceConversationContainer = memo(
 		interactionRequiredSessionIds,
 		onSessionCompleted,
 		workspaceChangeRequest = null,
+		onSessionAborted,
 		headerActions,
 		headerLeading,
 		pendingPromptForSession = null,
@@ -168,6 +170,7 @@ export const WorkspaceConversationContainer = memo(
 			onSendingWorkspacesChange,
 			onInteractionSessionsChange,
 			onSessionCompleted,
+			onSessionAborted,
 		});
 
 		const queueItems = displayedSessionId

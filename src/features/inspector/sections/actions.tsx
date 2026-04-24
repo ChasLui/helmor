@@ -97,6 +97,7 @@ const EMPTY_FORGE_ACTION_STATUS: ForgeActionStatus = {
 
 type ActionsSectionProps = {
 	workspaceId: string | null;
+	workspaceState?: string | null;
 	repoId?: string | null;
 	workspaceRemote?: string | null;
 	sectionRef?: React.RefObject<HTMLElement | null>;
@@ -143,6 +144,7 @@ function buildSyncResolutionPrompt(
 
 export function ActionsSection({
 	workspaceId,
+	workspaceState,
 	repoId,
 	workspaceRemote,
 	sectionRef,
@@ -161,13 +163,16 @@ export function ActionsSection({
 		...workspaceForgeQueryOptions(workspaceId ?? "__none__"),
 		enabled: workspaceId !== null,
 	});
+	// Archived workspaces have no live worktree — polling git/PR status every
+	// 10s would spam errors. App.tsx mirrors this guard.
+	const isArchived = workspaceState === "archived";
 	const gitStatusQuery = useQuery({
 		...workspaceGitActionStatusQueryOptions(workspaceId ?? "__none__"),
-		enabled: workspaceId !== null,
+		enabled: workspaceId !== null && !isArchived,
 	});
 	const forgeStatusQuery = useQuery({
 		...workspaceForgeActionStatusQueryOptions(workspaceId ?? "__none__"),
-		enabled: workspaceId !== null,
+		enabled: workspaceId !== null && !isArchived,
 	});
 	const gitStatus = gitStatusQuery.data ?? EMPTY_GIT_ACTION_STATUS;
 	const forgeStatus = forgeStatusQuery.data ?? EMPTY_FORGE_ACTION_STATUS;
