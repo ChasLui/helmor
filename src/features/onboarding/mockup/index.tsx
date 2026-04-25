@@ -15,7 +15,18 @@ const MOCKUP_LOGICAL_HEIGHT = 900;
 const MOCKUP_SIDEBAR_WIDTH = 240;
 const MOCKUP_INSPECTOR_WIDTH = 280;
 
-export function HelmorOnboardingMockup() {
+export function HelmorOnboardingMockup({
+	interactive = false,
+}: {
+	/**
+	 * When false (default), interactive affordances inside the mockup
+	 * (e.g. the sidebar's "add repository" dropdown) are disabled so the
+	 * mockup behaves as a still preview. The onboarding flow flips this on
+	 * during later steps where the mockup acts as a backdrop and small
+	 * interactions ("look, you can open this") add narrative polish.
+	 */
+	interactive?: boolean;
+} = {}) {
 	const containerRef = useRef<HTMLDivElement>(null);
 	const [scale, setScale] = useState(0.5);
 
@@ -50,7 +61,7 @@ export function HelmorOnboardingMockup() {
 					className="flex h-full shrink-0 bg-sidebar"
 					style={{ width: `${MOCKUP_SIDEBAR_WIDTH}px` }}
 				>
-					<MockSidebar />
+					<MockSidebar interactive={interactive} />
 				</div>
 				<div className="w-px shrink-0 bg-border" />
 				<MockConversation />

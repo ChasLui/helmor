@@ -1,5 +1,11 @@
-import { FolderPlus, Plus } from "lucide-react";
+import { Folder, FolderPlus, Globe, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { mockSidebar } from "./data";
 import { humanizeBranch } from "./ui/shared";
 import { WorkspaceGroupHeaderUI } from "./ui/workspace-group-header.ui";
@@ -7,25 +13,49 @@ import { WorkspaceRowUI } from "./ui/workspace-row.ui";
 import { WorkspaceSidebarShellUI } from "./ui/workspace-sidebar.ui";
 
 /**
- * Onboarding mock sidebar — renders the real `WorkspaceSidebarShellUI` /
- * `WorkspaceGroupHeaderUI` / `WorkspaceRowUI` primitives with static mock
- * data. Visual parity with the real sidebar is enforced by sharing the same
- * .ui.tsx components — no hand-rolled JSX here.
+ * Onboarding mock sidebar — renders the mockup-private `.ui.tsx` shells
+ * (sidebar shell, group header, row) with static mock data. The folder-plus
+ * action is wrapped in a Radix DropdownMenu mirroring the real navigation
+ * sidebar's "Open project / Clone from URL" affordance, but the items are
+ * decorative — they do not invoke real Tauri commands.
+ *
+ * When `interactive` is false (the default and the case during the very
+ * first onboarding frame), the dropdown trigger is disabled so the still
+ * preview can't be popped open by a stray click.
  */
-export function MockSidebar() {
+export function MockSidebar({
+	interactive = false,
+}: {
+	interactive?: boolean;
+}) {
 	return (
 		<WorkspaceSidebarShellUI
 			headerActions={
 				<>
-					<Button
-						type="button"
-						aria-label="Add repository"
-						variant="ghost"
-						size="icon-xs"
-						className="text-muted-foreground"
-					>
-						<FolderPlus className="size-4" strokeWidth={2} />
-					</Button>
+					<DropdownMenu>
+						<DropdownMenuTrigger asChild>
+							<Button
+								type="button"
+								aria-label="Add repository"
+								variant="ghost"
+								size="icon-xs"
+								disabled={!interactive}
+								className="text-muted-foreground"
+							>
+								<FolderPlus className="size-4" strokeWidth={2} />
+							</Button>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent align="end" className="min-w-40">
+							<DropdownMenuItem onSelect={(event) => event.preventDefault()}>
+								<Folder strokeWidth={2} />
+								<span>Open project</span>
+							</DropdownMenuItem>
+							<DropdownMenuItem onSelect={(event) => event.preventDefault()}>
+								<Globe strokeWidth={2} />
+								<span>Clone from URL</span>
+							</DropdownMenuItem>
+						</DropdownMenuContent>
+					</DropdownMenu>
 					<Button
 						type="button"
 						aria-label="New workspace"

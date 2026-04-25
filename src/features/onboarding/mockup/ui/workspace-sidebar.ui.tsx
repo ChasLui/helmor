@@ -7,8 +7,9 @@ import type { ReactNode } from "react";
  * is independent.
  *
  * Note: the real production sidebar uses `<TrafficLightSpacer />` which
- * detects platform and only reserves space on macOS. The mockup hardcodes
- * a fixed 94px spacer so the preview looks the same for every viewer.
+ * just reserves blank space on macOS for the OS-rendered traffic lights.
+ * The mockup paints fake red/yellow/green dots so the preview looks like
+ * a real window for every viewer regardless of platform.
  */
 export function WorkspaceSidebarShellUI({
 	headerActions,
@@ -21,9 +22,17 @@ export function WorkspaceSidebarShellUI({
 		<div className="flex h-full min-h-0 w-full flex-col overflow-hidden">
 			<div
 				data-slot="window-safe-top"
-				className="flex h-9 shrink-0 items-center pr-3"
+				className="flex h-9 shrink-0 items-center gap-1.5 px-3"
 			>
-				<div className="h-full shrink-0" style={{ width: "94px" }} />
+				<span aria-hidden="true" className="size-2.5 rounded-full bg-red-500" />
+				<span
+					aria-hidden="true"
+					className="size-2.5 rounded-full bg-yellow-400"
+				/>
+				<span
+					aria-hidden="true"
+					className="size-2.5 rounded-full bg-green-500"
+				/>
 				<div className="h-full flex-1" />
 			</div>
 
