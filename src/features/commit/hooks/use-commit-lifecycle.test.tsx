@@ -3,23 +3,22 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
-	PullRequestInfo,
+	ChangeRequestInfo,
+	ForgeActionStatus,
 	WorkspaceGitActionStatus,
-	WorkspacePrActionStatus,
 } from "@/lib/api";
 import { helmorQueryKeys } from "@/lib/query-client";
 import { useWorkspaceCommitLifecycle } from "./use-commit-lifecycle";
 
 const apiMocks = vi.hoisted(() => ({
-	closeWorkspacePr: vi.fn(),
+	closeWorkspaceChangeRequest: vi.fn(),
 	createSession: vi.fn(),
 	hideSession: vi.fn(),
 	loadRepoPreferences: vi.fn(),
 	loadAutoCloseActionKinds: vi.fn(),
-	lookupWorkspacePr: vi.fn(),
-	mergeWorkspacePr: vi.fn(),
+	refreshWorkspaceChangeRequest: vi.fn(),
+	mergeWorkspaceChangeRequest: vi.fn(),
 	pushWorkspaceToRemote: vi.fn(),
-	setWorkspaceManualStatus: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
@@ -27,15 +26,14 @@ vi.mock("@/lib/api", async (importOriginal) => {
 
 	return {
 		...actual,
-		closeWorkspacePr: apiMocks.closeWorkspacePr,
+		closeWorkspaceChangeRequest: apiMocks.closeWorkspaceChangeRequest,
 		createSession: apiMocks.createSession,
 		hideSession: apiMocks.hideSession,
 		loadRepoPreferences: apiMocks.loadRepoPreferences,
 		loadAutoCloseActionKinds: apiMocks.loadAutoCloseActionKinds,
-		lookupWorkspacePr: apiMocks.lookupWorkspacePr,
-		mergeWorkspacePr: apiMocks.mergeWorkspacePr,
+		refreshWorkspaceChangeRequest: apiMocks.refreshWorkspaceChangeRequest,
+		mergeWorkspaceChangeRequest: apiMocks.mergeWorkspaceChangeRequest,
 		pushWorkspaceToRemote: apiMocks.pushWorkspaceToRemote,
-		setWorkspaceManualStatus: apiMocks.setWorkspaceManualStatus,
 	};
 });
 
@@ -50,8 +48,8 @@ const EMPTY_GIT_ACTION_STATUS: WorkspaceGitActionStatus = {
 	pushStatus: "unknown",
 };
 
-const EMPTY_PR_ACTION_STATUS: WorkspacePrActionStatus = {
-	pr: null,
+const EMPTY_FORGE_ACTION_STATUS: ForgeActionStatus = {
+	changeRequest: null,
 	reviewDecision: null,
 	mergeable: null,
 	deployments: [],
@@ -70,27 +68,25 @@ function createWrapper(queryClient: QueryClient) {
 
 describe("useWorkspaceCommitLifecycle", () => {
 	beforeEach(() => {
-		apiMocks.closeWorkspacePr.mockReset();
+		apiMocks.closeWorkspaceChangeRequest.mockReset();
 		apiMocks.createSession.mockReset();
 		apiMocks.hideSession.mockReset();
 		apiMocks.loadRepoPreferences.mockReset();
 		apiMocks.loadAutoCloseActionKinds.mockReset();
-		apiMocks.lookupWorkspacePr.mockReset();
-		apiMocks.mergeWorkspacePr.mockReset();
+		apiMocks.refreshWorkspaceChangeRequest.mockReset();
+		apiMocks.mergeWorkspaceChangeRequest.mockReset();
 		apiMocks.pushWorkspaceToRemote.mockReset();
-		apiMocks.setWorkspaceManualStatus.mockReset();
 
 		apiMocks.createSession.mockResolvedValue({ sessionId: "session-action" });
 		apiMocks.loadRepoPreferences.mockResolvedValue({});
 		apiMocks.loadAutoCloseActionKinds.mockResolvedValue(["create-pr"]);
-		apiMocks.setWorkspaceManualStatus.mockResolvedValue(undefined);
-		apiMocks.lookupWorkspacePr.mockResolvedValue({
+		apiMocks.refreshWorkspaceChangeRequest.mockResolvedValue({
 			number: 53,
 			title: "Fix overflow",
 			url: "https://github.com/example/repo/pull/53",
 			state: "OPEN",
 			isMerged: false,
-		} satisfies PullRequestInfo);
+		} satisfies ChangeRequestInfo);
 		apiMocks.pushWorkspaceToRemote.mockResolvedValue({
 			targetRef: "origin/feature/test",
 			headCommit: "abc123",
@@ -134,9 +130,9 @@ describe("useWorkspaceCommitLifecycle", () => {
 					selectedWorkspaceId: "workspace-1",
 					selectedWorkspaceIdRef,
 					selectedRepoId: "repo-1",
-					workspaceManualStatus: null,
-					workspacePrInfo: null,
-					workspacePrActionStatus: EMPTY_PR_ACTION_STATUS,
+					selectedWorkspaceTargetBranch: "main",
+					changeRequest: null,
+					forgeActionStatus: EMPTY_FORGE_ACTION_STATUS,
 					workspaceGitActionStatus: EMPTY_GIT_ACTION_STATUS,
 					completedSessionIds,
 					interactionRequiredSessionIds,
@@ -182,21 +178,17 @@ describe("useWorkspaceCommitLifecycle", () => {
 		});
 
 		await waitFor(() => {
-			expect(apiMocks.lookupWorkspacePr).toHaveBeenCalledWith("workspace-1");
-		});
-		await waitFor(() => {
-			expect(invalidateQueriesSpy).toHaveBeenCalledWith({
-				queryKey: helmorQueryKeys.workspacePr("workspace-1"),
-			});
-			expect(invalidateQueriesSpy).toHaveBeenCalledWith({
-				queryKey: helmorQueryKeys.workspacePrActionStatus("workspace-1"),
-			});
-		});
-		await waitFor(() => {
-			expect(apiMocks.setWorkspaceManualStatus).toHaveBeenCalledWith(
+			expect(apiMocks.refreshWorkspaceChangeRequest).toHaveBeenCalledWith(
 				"workspace-1",
-				"review",
 			);
+		});
+		await waitFor(() => {
+			expect(invalidateQueriesSpy).toHaveBeenCalledWith({
+				queryKey: helmorQueryKeys.workspaceChangeRequest("workspace-1"),
+			});
+			expect(invalidateQueriesSpy).toHaveBeenCalledWith({
+				queryKey: helmorQueryKeys.workspaceForgeActionStatus("workspace-1"),
+			});
 		});
 		await waitFor(() => {
 			expect(apiMocks.hideSession).toHaveBeenCalledWith("session-action");
@@ -204,6 +196,80 @@ describe("useWorkspaceCommitLifecycle", () => {
 		await waitFor(() => {
 			expect(onSelectSession).toHaveBeenCalledWith("session-after-close");
 		});
+	});
+
+	it("clears the lifecycle when the tracked action session is aborted", async () => {
+		const queryClient = new QueryClient({
+			defaultOptions: { queries: { retry: false } },
+		});
+
+		const selectedWorkspaceIdRef = { current: "workspace-1" };
+		const onSelectSession = vi.fn();
+
+		const { result, rerender } = renderHook(
+			({
+				completedSessionIds,
+				abortedSessionIds,
+				sendingSessionIds,
+			}: {
+				completedSessionIds: Set<string>;
+				abortedSessionIds: Set<string>;
+				sendingSessionIds: Set<string>;
+			}) =>
+				useWorkspaceCommitLifecycle({
+					queryClient,
+					selectedWorkspaceId: "workspace-1",
+					selectedWorkspaceIdRef,
+					selectedRepoId: "repo-1",
+					selectedWorkspaceTargetBranch: "main",
+					changeRequest: null,
+					forgeActionStatus: EMPTY_FORGE_ACTION_STATUS,
+					workspaceGitActionStatus: EMPTY_GIT_ACTION_STATUS,
+					completedSessionIds,
+					abortedSessionIds,
+					interactionRequiredSessionIds: new Set<string>(),
+					sendingSessionIds,
+					onSelectSession,
+				}),
+			{
+				initialProps: {
+					completedSessionIds: new Set<string>(),
+					abortedSessionIds: new Set<string>(),
+					sendingSessionIds: new Set<string>(),
+				},
+				wrapper: createWrapper(queryClient),
+			},
+		);
+
+		await act(async () => {
+			await result.current.handleInspectorCommitAction("create-pr");
+		});
+
+		expect(result.current.commitButtonState).toBe("busy");
+
+		act(() => {
+			result.current.handlePendingPromptConsumed();
+		});
+
+		// Session starts streaming.
+		rerender({
+			completedSessionIds: new Set<string>(),
+			abortedSessionIds: new Set<string>(),
+			sendingSessionIds: new Set(["session-action"]),
+		});
+
+		// User aborts: session leaves sendingSessionIds and enters
+		// abortedSessionIds without ever reaching completedSessionIds.
+		rerender({
+			completedSessionIds: new Set<string>(),
+			abortedSessionIds: new Set(["session-action"]),
+			sendingSessionIds: new Set<string>(),
+		});
+
+		await waitFor(() => {
+			expect(result.current.commitButtonState).toBe("idle");
+		});
+		expect(apiMocks.refreshWorkspaceChangeRequest).not.toHaveBeenCalled();
 	});
 
 	it("pushes directly without creating an action session", async () => {
@@ -225,9 +291,8 @@ describe("useWorkspaceCommitLifecycle", () => {
 					selectedWorkspaceId: "workspace-1",
 					selectedWorkspaceIdRef: { current: "workspace-1" },
 					selectedRepoId: "repo-1",
-					workspaceManualStatus: null,
-					workspacePrInfo: null,
-					workspacePrActionStatus: EMPTY_PR_ACTION_STATUS,
+					changeRequest: null,
+					forgeActionStatus: EMPTY_FORGE_ACTION_STATUS,
 					workspaceGitActionStatus: {
 						...EMPTY_GIT_ACTION_STATUS,
 						pushStatus: "unpublished",
@@ -257,10 +322,10 @@ describe("useWorkspaceCommitLifecycle", () => {
 				queryKey: helmorQueryKeys.workspaceGitActionStatus("workspace-1"),
 			});
 			expect(invalidateQueriesSpy).toHaveBeenCalledWith({
-				queryKey: helmorQueryKeys.workspacePr("workspace-1"),
+				queryKey: helmorQueryKeys.workspaceChangeRequest("workspace-1"),
 			});
 			expect(invalidateQueriesSpy).toHaveBeenCalledWith({
-				queryKey: helmorQueryKeys.workspacePrActionStatus("workspace-1"),
+				queryKey: helmorQueryKeys.workspaceForgeActionStatus("workspace-1"),
 			});
 			expect(invalidateQueriesSpy).toHaveBeenCalledWith({
 				queryKey: helmorQueryKeys.workspaceDetail("workspace-1"),
@@ -297,9 +362,8 @@ describe("useWorkspaceCommitLifecycle", () => {
 					selectedWorkspaceId: "workspace-1",
 					selectedWorkspaceIdRef: { current: "workspace-1" },
 					selectedRepoId: "repo-1",
-					workspaceManualStatus: null,
-					workspacePrInfo: null,
-					workspacePrActionStatus: EMPTY_PR_ACTION_STATUS,
+					changeRequest: null,
+					forgeActionStatus: EMPTY_FORGE_ACTION_STATUS,
 					workspaceGitActionStatus: {
 						...EMPTY_GIT_ACTION_STATUS,
 						pushStatus: "unpublished",
@@ -346,9 +410,8 @@ describe("useWorkspaceCommitLifecycle", () => {
 					selectedWorkspaceId: "workspace-1",
 					selectedWorkspaceIdRef: { current: "workspace-1" },
 					selectedRepoId: "repo-1",
-					workspaceManualStatus: null,
-					workspacePrInfo: null,
-					workspacePrActionStatus: EMPTY_PR_ACTION_STATUS,
+					changeRequest: null,
+					forgeActionStatus: EMPTY_FORGE_ACTION_STATUS,
 					workspaceGitActionStatus: EMPTY_GIT_ACTION_STATUS,
 					completedSessionIds: new Set<string>(),
 					interactionRequiredSessionIds: new Set<string>(),
@@ -381,7 +444,7 @@ describe("useWorkspaceCommitLifecycle", () => {
 			},
 		});
 		const pushToast = vi.fn();
-		apiMocks.mergeWorkspacePr.mockRejectedValueOnce(
+		apiMocks.mergeWorkspaceChangeRequest.mockRejectedValueOnce(
 			new Error("GitHub merge failed"),
 		);
 
@@ -392,16 +455,15 @@ describe("useWorkspaceCommitLifecycle", () => {
 					selectedWorkspaceId: "workspace-1",
 					selectedWorkspaceIdRef: { current: "workspace-1" },
 					selectedRepoId: "repo-1",
-					workspaceManualStatus: null,
-					workspacePrInfo: {
+					changeRequest: {
 						number: 53,
 						title: "Fix overflow",
 						url: "https://github.com/example/repo/pull/53",
 						state: "OPEN",
 						isMerged: false,
 					},
-					workspacePrActionStatus: {
-						...EMPTY_PR_ACTION_STATUS,
+					forgeActionStatus: {
+						...EMPTY_FORGE_ACTION_STATUS,
 						mergeable: "MERGEABLE",
 					},
 					workspaceGitActionStatus: EMPTY_GIT_ACTION_STATUS,

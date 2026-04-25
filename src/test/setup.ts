@@ -110,6 +110,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 // commands the boot path hits; individual tests still mock `./lib/api`
 // directly when they need specific return values.
 vi.mock("@tauri-apps/api/core", () => ({
+	convertFileSrc: vi.fn((path: string) => `asset://localhost${path}`),
 	invoke: vi.fn(async (command: string) => {
 		switch (command) {
 			case "get_app_settings":
@@ -156,6 +157,16 @@ vi.mock("@tauri-apps/api/core", () => ({
 				return { lastCloneDirectory: null };
 			case "get_data_info":
 				return null;
+			case "get_app_update_status":
+				return {
+					stage: "idle",
+					configured: true,
+					autoUpdateEnabled: true,
+					update: null,
+					lastError: null,
+					lastAttemptAt: null,
+					downloadedAt: null,
+				};
 			case "load_auto_close_action_kinds":
 				return [];
 			case "load_auto_close_opt_in_asked":
@@ -172,8 +183,44 @@ vi.mock("@tauri-apps/api/core", () => ({
 				return [];
 			case "list_workspace_candidate_directories":
 				return [];
-			case "lookup_workspace_pr":
+			case "refresh_workspace_change_request":
 				return null;
+			case "get_workspace_forge":
+				return {
+					provider: "unknown",
+					host: null,
+					namespace: null,
+					repo: null,
+					remoteUrl: null,
+					labels: {
+						providerName: "Forge",
+						cliName: "CLI",
+						changeRequestName: "PR",
+						changeRequestFullName: "change request",
+						installAction: "Install CLI",
+						connectAction: "Connect Forge",
+					},
+					cli: null,
+					detectionSignals: [],
+				};
+			case "get_forge_cli_status":
+				return {
+					status: "missing",
+					provider: "gitlab",
+					host: "gitlab.com",
+					cliName: "glab",
+					message: "GitLab CLI is not installed.",
+					installCommand: "brew install glab",
+				};
+			case "install_forge_cli":
+				return {
+					status: "missing",
+					provider: "gitlab",
+					host: "gitlab.com",
+					cliName: "glab",
+					message: "GitLab CLI is not installed.",
+					installCommand: "brew install glab",
+				};
 			case "get_workspace_git_action_status":
 				return {
 					uncommittedCount: 0,
@@ -185,9 +232,9 @@ vi.mock("@tauri-apps/api/core", () => ({
 					remoteTrackingRef: null,
 					pushStatus: "unknown",
 				};
-			case "get_workspace_pr_action_status":
+			case "get_workspace_forge_action_status":
 				return {
-					pr: null,
+					changeRequest: null,
 					reviewDecision: null,
 					mergeable: null,
 					deployments: [],
@@ -195,6 +242,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 					remoteState: "unavailable",
 					message: null,
 				};
+			case "open_forge_cli_auth_terminal":
+				return undefined;
+			case "get_workspace_forge_check_insert_text":
+				return "";
 			case "drain_pending_cli_sends":
 				return [];
 			case "conductor_source_available":

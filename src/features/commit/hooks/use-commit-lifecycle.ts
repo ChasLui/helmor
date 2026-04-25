@@ -8,20 +8,19 @@ import {
 	useState,
 } from "react";
 import {
-	closeWorkspacePr,
+	type ChangeRequestInfo,
+	closeWorkspaceChangeRequest,
 	createSession,
-	type DerivedStatus,
+	type ForgeActionStatus,
+	type ForgeDetection,
 	hideSession,
 	loadAutoCloseActionKinds,
 	loadRepoPreferences,
-	lookupWorkspacePr,
-	mergeWorkspacePr,
-	type PullRequestInfo,
+	mergeWorkspaceChangeRequest,
 	pushWorkspaceToRemote,
-	setWorkspaceManualStatus,
+	refreshWorkspaceChangeRequest,
 	type WorkspaceDetail,
 	type WorkspaceGitActionStatus,
-	type WorkspacePrActionStatus,
 } from "@/lib/api";
 import {
 	deriveCommitButtonMode,
@@ -31,14 +30,20 @@ import {
 	buildCommitButtonPrompt,
 	isActionSessionMode,
 } from "@/lib/commit-button-prompts";
-import { helmorQueryKeys } from "@/lib/query-client";
+import {
+	helmorQueryKeys,
+	workspaceForgeQueryOptions,
+} from "@/lib/query-client";
 import type { PushWorkspaceToast } from "@/lib/workspace-toast-context";
 import type { CommitButtonState, WorkspaceCommitButtonMode } from "../button";
 
-function getActionFailureTitle(mode: WorkspaceCommitButtonMode): string {
+function getActionFailureTitle(
+	mode: WorkspaceCommitButtonMode,
+	changeRequestName = "PR",
+): string {
 	switch (mode) {
 		case "create-pr":
-			return "Create PR failed";
+			return `Create ${changeRequestName} failed`;
 		case "commit-and-push":
 			return "Commit and push failed";
 		case "push":
@@ -50,9 +55,9 @@ function getActionFailureTitle(mode: WorkspaceCommitButtonMode): string {
 		case "merge":
 			return "Merge failed";
 		case "open-pr":
-			return "Open PR failed";
+			return `Open ${changeRequestName} failed`;
 		case "closed":
-			return "Close PR failed";
+			return `Close ${changeRequestName} failed`;
 		default:
 			return "Action failed";
 	}
@@ -67,7 +72,7 @@ type CommitLifecycle = {
 	trackedSessionId: string | null;
 	mode: WorkspaceCommitButtonMode;
 	phase: "creating" | "streaming" | "verifying" | "done" | "error";
-	prInfo: PullRequestInfo | null;
+	changeRequest: ChangeRequestInfo | null;
 };
 
 export type PendingPromptForSession = {
@@ -87,11 +92,13 @@ export function useWorkspaceCommitLifecycle({
 	selectedWorkspaceId,
 	selectedWorkspaceIdRef,
 	selectedRepoId,
-	workspaceManualStatus,
-	workspacePrInfo,
-	workspacePrActionStatus,
+	selectedWorkspaceTargetBranch,
+	changeRequest,
+	forgeDetection,
+	forgeActionStatus,
 	workspaceGitActionStatus,
 	completedSessionIds,
+	abortedSessionIds,
 	interactionRequiredSessionIds,
 	sendingSessionIds,
 	onSelectSession,
@@ -101,11 +108,13 @@ export function useWorkspaceCommitLifecycle({
 	selectedWorkspaceId: string | null;
 	selectedWorkspaceIdRef: MutableRefObject<string | null>;
 	selectedRepoId: string | null;
-	workspaceManualStatus: DerivedStatus | null;
-	workspacePrInfo: PullRequestInfo | null;
-	workspacePrActionStatus: WorkspacePrActionStatus | null;
+	selectedWorkspaceTargetBranch?: string | null;
+	changeRequest?: ChangeRequestInfo | null;
+	forgeDetection?: ForgeDetection | null;
+	forgeActionStatus?: ForgeActionStatus | null;
 	workspaceGitActionStatus: WorkspaceGitActionStatus | null;
 	completedSessionIds: Set<string>;
+	abortedSessionIds?: Set<string>;
 	interactionRequiredSessionIds: Set<string>;
 	sendingSessionIds: Set<string>;
 	onSelectSession: (sessionId: string | null) => void;
@@ -115,11 +124,14 @@ export function useWorkspaceCommitLifecycle({
 		useState<PendingPromptForSession | null>(null);
 	const [commitLifecycle, setCommitLifecycle] =
 		useState<CommitLifecycle | null>(null);
+	const currentChangeRequest = changeRequest ?? null;
+	const currentForgeActionStatus = forgeActionStatus ?? null;
+	const changeRequestName = forgeDetection?.labels.changeRequestName ?? "PR";
 
 	// Keep a stable ref so the merge-validation guard in the callback can
 	// read the latest value without adding it to the dependency array.
-	const prActionStatusRef = useRef(workspacePrActionStatus);
-	prActionStatusRef.current = workspacePrActionStatus;
+	const forgeActionStatusRef = useRef(currentForgeActionStatus);
+	forgeActionStatusRef.current = currentForgeActionStatus;
 
 	const refreshWorkspaceRemoteStatus = useCallback(
 		(workspaceId: string) => {
@@ -127,10 +139,10 @@ export function useWorkspaceCommitLifecycle({
 				queryKey: helmorQueryKeys.workspaceGitActionStatus(workspaceId),
 			});
 			void queryClient.invalidateQueries({
-				queryKey: helmorQueryKeys.workspacePr(workspaceId),
+				queryKey: helmorQueryKeys.workspaceChangeRequest(workspaceId),
 			});
 			void queryClient.invalidateQueries({
-				queryKey: helmorQueryKeys.workspacePrActionStatus(workspaceId),
+				queryKey: helmorQueryKeys.workspaceForgeActionStatus(workspaceId),
 			});
 			void queryClient.invalidateQueries({
 				queryKey: helmorQueryKeys.workspaceDetail(workspaceId),
@@ -156,13 +168,13 @@ export function useWorkspaceCommitLifecycle({
 			if (mode === "merge" || mode === "closed") {
 				// ── Merge pre-validation ─────────────────────────────────
 				if (mode === "merge") {
-					const currentMergeable = prActionStatusRef.current?.mergeable;
+					const currentMergeable = forgeActionStatusRef.current?.mergeable;
 					if (currentMergeable === "CONFLICTING") {
 						console.warn(
-							"[commitButton] merge blocked: PR has merge conflicts",
+							`[commitButton] merge blocked: ${changeRequestName} has merge conflicts`,
 						);
 						pushToast?.(
-							"PR has merge conflicts and cannot be merged yet.",
+							`${changeRequestName} has merge conflicts and cannot be merged yet.`,
 							"Merge blocked",
 							"destructive",
 						);
@@ -179,72 +191,64 @@ export function useWorkspaceCommitLifecycle({
 						);
 						// Trigger a refresh so the status resolves sooner
 						void queryClient.invalidateQueries({
-							queryKey: helmorQueryKeys.workspacePrActionStatus(workspaceId),
+							queryKey: helmorQueryKeys.workspaceForgeActionStatus(workspaceId),
 						});
 						return;
 					}
 				}
 
-				const currentPr = queryClient.getQueryData<PullRequestInfo | null>(
-					helmorQueryKeys.workspacePr(workspaceId),
-				);
-				const optimisticPr: PullRequestInfo | null = currentPr
-					? {
-							...currentPr,
-							state: mode === "merge" ? "MERGED" : "CLOSED",
-							isMerged: mode === "merge",
-						}
-					: null;
-				const optimisticStatus = mode === "merge" ? "done" : "canceled";
-				const previousStatus = workspaceManualStatus;
-
+				const cachedChangeRequest =
+					queryClient.getQueryData<ChangeRequestInfo | null>(
+						helmorQueryKeys.workspaceChangeRequest(workspaceId),
+					);
+				const optimisticChangeRequest: ChangeRequestInfo | null =
+					cachedChangeRequest
+						? {
+								...cachedChangeRequest,
+								state: mode === "merge" ? "MERGED" : "CLOSED",
+								isMerged: mode === "merge",
+							}
+						: null;
 				setCommitLifecycle({
 					workspaceId,
 					trackedSessionId: null,
 					mode,
 					phase: "done",
-					prInfo: optimisticPr,
+					changeRequest: optimisticChangeRequest,
 				});
 				queryClient.setQueryData(
-					helmorQueryKeys.workspacePr(workspaceId),
-					optimisticPr,
-				);
-				void setWorkspaceManualStatus(workspaceId, optimisticStatus).then(() =>
-					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.workspaceGroups,
-					}),
+					helmorQueryKeys.workspaceChangeRequest(workspaceId),
+					optimisticChangeRequest,
 				);
 
 				void (async () => {
 					try {
 						const result =
 							mode === "merge"
-								? await mergeWorkspacePr(workspaceId)
-								: await closeWorkspacePr(workspaceId);
+								? await mergeWorkspaceChangeRequest(workspaceId)
+								: await closeWorkspaceChangeRequest(workspaceId);
 						queryClient.setQueryData(
-							helmorQueryKeys.workspacePr(workspaceId),
+							helmorQueryKeys.workspaceChangeRequest(workspaceId),
 							result,
 						);
 					} catch (error) {
 						console.error(`[commitButton] ${mode} failed:`, error);
 						pushToast?.(
 							getErrorMessage(error, "Unable to complete action."),
-							getActionFailureTitle(mode),
+							getActionFailureTitle(mode, changeRequestName),
 							"destructive",
 						);
 						queryClient.setQueryData(
-							helmorQueryKeys.workspacePr(workspaceId),
-							currentPr,
-						);
-						void setWorkspaceManualStatus(workspaceId, previousStatus).then(
-							() =>
-								queryClient.invalidateQueries({
-									queryKey: helmorQueryKeys.workspaceGroups,
-								}),
+							helmorQueryKeys.workspaceChangeRequest(workspaceId),
+							cachedChangeRequest,
 						);
 						setCommitLifecycle((prev) =>
 							prev
-								? { ...prev, phase: "error", prInfo: currentPr ?? null }
+								? {
+										...prev,
+										phase: "error",
+										changeRequest: cachedChangeRequest ?? null,
+									}
 								: prev,
 						);
 					}
@@ -257,7 +261,7 @@ export function useWorkspaceCommitLifecycle({
 				trackedSessionId: null,
 				mode,
 				phase: "creating",
-				prInfo: null,
+				changeRequest: null,
 			});
 
 			if (mode === "push") {
@@ -291,7 +295,15 @@ export function useWorkspaceCommitLifecycle({
 				const repoPreferences = selectedRepoId
 					? await loadRepoPreferences(selectedRepoId)
 					: null;
-				const prompt = buildCommitButtonPrompt(mode, repoPreferences);
+				const forge = await queryClient
+					.ensureQueryData(workspaceForgeQueryOptions(workspaceId))
+					.catch(() => null);
+				const prompt = buildCommitButtonPrompt(
+					mode,
+					repoPreferences,
+					selectedWorkspaceTargetBranch,
+					forge,
+				);
 				console.log("[commitButton] session created", { sessionId });
 
 				await queryClient.invalidateQueries({
@@ -310,7 +322,7 @@ export function useWorkspaceCommitLifecycle({
 				console.error("[commitButton] Failed to start session:", error);
 				pushToast?.(
 					getErrorMessage(error, "Unable to start action."),
-					getActionFailureTitle(mode),
+					getActionFailureTitle(mode, changeRequestName),
 					"destructive",
 				);
 				setCommitLifecycle((current) =>
@@ -321,10 +333,11 @@ export function useWorkspaceCommitLifecycle({
 		[
 			onSelectSession,
 			pushToast,
+			changeRequestName,
 			queryClient,
 			selectedRepoId,
+			selectedWorkspaceTargetBranch,
 			selectedWorkspaceIdRef,
-			workspaceManualStatus,
 		],
 	);
 
@@ -355,6 +368,7 @@ export function useWorkspaceCommitLifecycle({
 		console.log("[commitButton] action-session settlement check", {
 			sendingIds: Array.from(sendingSessionIds),
 			completedIds: Array.from(completedSessionIds),
+			abortedIds: abortedSessionIds ? Array.from(abortedSessionIds) : [],
 			interactionRequiredIds: Array.from(interactionRequiredSessionIds),
 			lifecyclePhase: current?.phase ?? null,
 			trackedSessionId: current?.trackedSessionId ?? null,
@@ -366,6 +380,19 @@ export function useWorkspaceCommitLifecycle({
 		if (current.phase !== "creating" && current.phase !== "streaming") return;
 
 		const trackedSessionId = current.trackedSessionId;
+
+		// Aborted sessions clear the lifecycle — no PR was created, so the
+		// button returns to idle rather than proceeding to verify.
+		if (abortedSessionIds?.has(trackedSessionId)) {
+			console.log(
+				"[commitButton] tracked session aborted — clearing lifecycle",
+			);
+			hasObservedSendingRef.current = false;
+			completedSessionHandledRef.current = null;
+			setCommitLifecycle(null);
+			return;
+		}
+
 		const isSending = sendingSessionIds.has(trackedSessionId);
 		if (isSending) {
 			console.log("[commitButton] tracked session is streaming");
@@ -411,19 +438,30 @@ export function useWorkspaceCommitLifecycle({
 		const workspaceId = current.workspaceId;
 		void (async () => {
 			try {
-				console.log("[commitButton] calling lookupWorkspacePr", workspaceId);
-				const pr = await lookupWorkspacePr(workspaceId);
-				console.log("[commitButton] lookupWorkspacePr result", pr);
+				console.log(
+					"[commitButton] calling refreshWorkspaceChangeRequest",
+					workspaceId,
+				);
+				const currentChangeRequest =
+					await refreshWorkspaceChangeRequest(workspaceId);
+				console.log(
+					"[commitButton] refreshWorkspaceChangeRequest result",
+					currentChangeRequest,
+				);
 				setCommitLifecycle((prev) => {
 					if (!prev || prev.workspaceId !== workspaceId) return prev;
-					return { ...prev, phase: "done", prInfo: pr ?? null };
+					return {
+						...prev,
+						phase: "done",
+						changeRequest: currentChangeRequest ?? null,
+					};
 				});
 				refreshWorkspaceRemoteStatus(workspaceId);
 			} catch (error) {
 				console.error("[commitButton] PR lookup failed:", error);
 				pushToast?.(
 					getErrorMessage(error, "Unable to verify action result."),
-					getActionFailureTitle(current.mode),
+					getActionFailureTitle(current.mode, changeRequestName),
 					"destructive",
 				);
 				setCommitLifecycle((prev) =>
@@ -434,7 +472,9 @@ export function useWorkspaceCommitLifecycle({
 			}
 		})();
 	}, [
+		changeRequestName,
 		completedSessionIds,
+		abortedSessionIds,
 		interactionRequiredSessionIds,
 		pushToast,
 		refreshWorkspaceRemoteStatus,
@@ -459,13 +499,6 @@ export function useWorkspaceCommitLifecycle({
 
 			void (async () => {
 				try {
-					if (mode === "create-pr") {
-						await setWorkspaceManualStatus(workspaceId, "review");
-						await queryClient.invalidateQueries({
-							queryKey: helmorQueryKeys.workspaceGroups,
-						});
-					}
-
 					if (!trackedSessionId) return;
 					const optedIn = await loadAutoCloseActionKinds();
 					if (!optedIn.includes(mode)) return;
@@ -515,21 +548,21 @@ export function useWorkspaceCommitLifecycle({
 		() =>
 			deriveCommitButtonMode(
 				activeLifecycle,
-				workspacePrInfo,
-				workspacePrActionStatus,
+				currentChangeRequest,
+				currentForgeActionStatus,
 				workspaceGitActionStatus,
 			),
 		[
 			activeLifecycle,
-			workspacePrInfo,
-			workspacePrActionStatus,
+			currentChangeRequest,
+			currentForgeActionStatus,
 			workspaceGitActionStatus,
 		],
 	);
 
 	const commitButtonState = useMemo<CommitButtonState>(
-		() => deriveCommitButtonState(activeLifecycle, workspacePrActionStatus),
-		[activeLifecycle, workspacePrActionStatus],
+		() => deriveCommitButtonState(activeLifecycle, currentForgeActionStatus),
+		[activeLifecycle, currentForgeActionStatus],
 	);
 
 	return {

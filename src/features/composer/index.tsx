@@ -81,6 +81,7 @@ import { $appendComposerInsertItems } from "./editor-ops";
 import type { ElicitationResponseHandler } from "./elicitation";
 import { ElicitationPanel } from "./elicitation-panel";
 import { FastModeLottieIcon } from "./fast-mode-lottie-icon";
+import { UsageStatsIndicator } from "./usage-stats-indicator";
 
 type WorkspaceComposerProps = {
 	contextKey: string;
@@ -139,6 +140,11 @@ type WorkspaceComposerProps = {
 	alwaysShowContextUsage?: boolean;
 	/** Helmor session id for the context-usage ring. */
 	sessionId?: string | null;
+	/** Provider's own session id (Claude Code UUID). Threaded into the
+	 *  context-usage ring for its hover-triggered live fetch. */
+	providerSessionId?: string | null;
+	/** Agent provider for this session — gates the Claude-only rich fetch. */
+	agentType?: "claude" | "codex" | null;
 };
 
 const EMPTY_SLASH_COMMANDS: readonly SlashCommandEntry[] = [];
@@ -209,6 +215,8 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
 	hasPlanReview = false,
 	alwaysShowContextUsage = false,
 	sessionId = null,
+	providerSessionId = null,
+	agentType = null,
 }: WorkspaceComposerProps) {
 	const instanceIdRef = useRef(
 		`composer-${Math.random().toString(36).slice(2, 10)}`,
@@ -718,16 +726,25 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
 							)}
 						</div>
 
-						<div className="flex items-center gap-2">
+						<div className="flex items-center gap-1">
+							<UsageStatsIndicator agentType={agentType} disabled={disabled} />
 							{sessionId ? (
 								<ContextUsageRing
 									sessionId={sessionId}
+									providerSessionId={providerSessionId}
+									composerModelId={selectedModel?.id ?? null}
+									cwd={workspaceRootPath}
+									agentType={agentType}
 									alwaysShow={alwaysShowContextUsage}
 									disabled={disabled}
 								/>
 							) : null}
+							{/* Trailing actions sit behind a visible outline/border, while the
+							    indicators to the left don't — that pulls the perceived gap in
+							    by ~6 px. ml-1.5 reserves the missing space so the row reads as
+							    evenly spaced. */}
 							{hasPlanReview && permissionMode === "plan" ? (
-								<>
+								<div className="ml-1.5 flex items-center gap-2">
 									<Button
 										variant="ghost"
 										size="sm"
@@ -750,9 +767,9 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
 										<Check className="size-3.5" strokeWidth={2} />
 										Implement
 									</Button>
-								</>
+								</div>
 							) : sending ? (
-								<div className="flex items-center gap-1.5">
+								<div className="ml-1.5 flex items-center gap-1.5">
 									<Button
 										variant="destructive"
 										size="icon"
@@ -783,7 +800,7 @@ export const WorkspaceComposer = memo(function WorkspaceComposer({
 									aria-label="Send"
 									onClick={handleSubmit}
 									disabled={sendDisabled}
-									className="rounded-[9px]"
+									className="ml-1.5 rounded-[9px]"
 								>
 									<ArrowUp className="size-[15px]" strokeWidth={2.2} />
 								</Button>

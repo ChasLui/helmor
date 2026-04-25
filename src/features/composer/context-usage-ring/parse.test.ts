@@ -1,262 +1,190 @@
 import { describe, expect, it } from "vitest";
 import {
+	type ClaudeRichContextUsage,
 	formatTokens,
+	parseClaudeRateLimits,
+	parseClaudeRichMeta,
 	parseCodexRateLimits,
-	parseContextUsageMeta,
+	parseStoredMeta,
+	resolveContextUsageDisplay,
 	ringTier,
+	type StoredContextUsageMeta,
 } from "./parse";
 
-describe("parseContextUsageMeta", () => {
+const CLAUDE_MODEL = "claude-opus-4-7[1m]";
+
+describe("parseStoredMeta", () => {
 	it("returns null for empty / null / unparseable input", () => {
-		expect(parseContextUsageMeta(null)).toBeNull();
-		expect(parseContextUsageMeta("")).toBeNull();
-		expect(parseContextUsageMeta("not json")).toBeNull();
-		expect(parseContextUsageMeta("[]")).toBeNull();
-		expect(parseContextUsageMeta("{}")).toBeNull();
+		expect(parseStoredMeta(null)).toBeNull();
+		expect(parseStoredMeta("")).toBeNull();
+		expect(parseStoredMeta("not json")).toBeNull();
+		expect(parseStoredMeta("[]")).toBeNull();
+		expect(parseStoredMeta("{}")).toBeNull();
 	});
 
-	it("parses Claude shape and filters Free space", () => {
-		const display = parseContextUsageMeta(
+	it("parses the baseline shape including modelId", () => {
+		const meta = parseStoredMeta(
 			JSON.stringify({
-				totalTokens: 20000,
-				maxTokens: 200000,
-				percentage: 10,
-				categories: [
-					{ name: "Free space", tokens: 180000 },
-					{ name: "Messages", tokens: 12000 },
-					{ name: "System tools", tokens: 5000 },
-					{ name: "Memory files", tokens: 3000 },
-				],
+				modelId: CLAUDE_MODEL,
+				usedTokens: 25_384,
+				maxTokens: 1_000_000,
+				percentage: 2.5384,
 			}),
 		);
-		expect(display).not.toBeNull();
-		if (!display || display.source !== "claude")
-			throw new Error("expected claude");
-		expect(display.used).toBe(20000);
-		expect(display.max).toBe(200000);
-		expect(display.percentage).toBe(10);
-		// Free space is filtered, the rest is sorted desc by tokens
-		expect(display.categories.map((c) => c.name)).toEqual([
-			"Messages",
-			"System tools",
-			"Memory files",
-		]);
-		// Per-category percentage is computed against max
-		expect(display.categories[0].percentage).toBeCloseTo(6);
-	});
-
-	it("falls back to computed percentage when SDK omits it", () => {
-		const display = parseContextUsageMeta(
-			JSON.stringify({
-				totalTokens: 50,
-				maxTokens: 200,
-				categories: [{ name: "Messages", tokens: 50 }],
-			}),
-		);
-		if (!display || display.source !== "claude")
-			throw new Error("expected claude");
-		expect(display.percentage).toBe(25);
-	});
-
-	it("parses Codex shape and uses `last` (not `total`) for context fill", () => {
-		// Critical: Codex's `total.*` is THREAD-CUMULATIVE billed tokens —
-		// each turn re-sends history and gets it counted again. The actual
-		// context size after the last turn is `last.totalTokens`. Mistaking
-		// `total` for current fill makes a few turns look like a near-full
-		// window even when real usage is small.
-		const display = parseContextUsageMeta(
-			JSON.stringify({
-				total: {
-					totalTokens: 937124,
-					inputTokens: 928536,
-					cachedInputTokens: 738560,
-					outputTokens: 8588,
-					reasoningOutputTokens: 1721,
-				},
-				last: {
-					totalTokens: 80467,
-					inputTokens: 79707,
-					cachedInputTokens: 79488,
-					outputTokens: 760,
-					reasoningOutputTokens: 0,
-				},
-				modelContextWindow: 950000,
-			}),
-		);
-		if (!display || display.source !== "codex")
-			throw new Error("expected codex");
-		// `used` MUST come from `last`, not `total`.
-		expect(display.used).toBe(80467);
-		expect(display.max).toBe(950000);
-		expect(display.percentage).toBeCloseTo(8.47, 2);
-		expect(display.last).toEqual({
-			total: 80467,
-			input: 79707,
-			cachedInput: 79488,
-			output: 760,
-			reasoningOutput: 0,
+		expect(meta).toEqual({
+			modelId: CLAUDE_MODEL,
+			usedTokens: 25_384,
+			maxTokens: 1_000_000,
+			percentage: 2.5384,
 		});
 	});
 
-	it("Codex: single-turn thread (total === last) renders identically", () => {
-		// Sanity check — for a fresh thread with only one turn, total and
-		// last carry the same numbers, and our `last`-based calculation
-		// matches what a `total`-based one would have produced.
-		const breakdown = {
-			totalTokens: 19868,
-			inputTokens: 19842,
-			cachedInputTokens: 2432,
-			outputTokens: 26,
-			reasoningOutputTokens: 19,
-		};
-		const display = parseContextUsageMeta(
+	it("tolerates a row with no modelId (legacy) as empty string", () => {
+		const meta = parseStoredMeta(
 			JSON.stringify({
-				total: breakdown,
-				last: breakdown,
-				modelContextWindow: 950000,
+				usedTokens: 100,
+				maxTokens: 1000,
+				percentage: 10,
 			}),
 		);
-		if (!display || display.source !== "codex")
-			throw new Error("expected codex");
-		expect(display.used).toBe(19868);
-		expect(display.percentage).toBeCloseTo(2.09, 2);
+		expect(meta?.modelId).toBe("");
 	});
 
-	it("Codex: falls back to `total` when `last` is missing", () => {
-		// Defensive — protocol contract has `last` non-optional, but if
-		// the field disappears for any reason we still want a sensible
-		// number rather than 0.
-		const display = parseContextUsageMeta(
+	it("computes percentage from used/max when not provided", () => {
+		const meta = parseStoredMeta(
 			JSON.stringify({
-				total: {
-					totalTokens: 12,
-					inputTokens: 10,
-					cachedInputTokens: 0,
-					outputTokens: 2,
-					reasoningOutputTokens: 0,
-				},
-				modelContextWindow: 100,
+				modelId: "m",
+				usedTokens: 500,
+				maxTokens: 1000,
 			}),
 		);
-		if (!display || display.source !== "codex")
-			throw new Error("expected codex");
-		expect(display.used).toBe(12);
-		expect(display.percentage).toBe(12);
+		expect(meta?.percentage).toBe(50);
 	});
 
-	it("returns 0 percentage when max is 0", () => {
-		const display = parseContextUsageMeta(
-			JSON.stringify({
-				total: {
-					totalTokens: 50,
-					inputTokens: 50,
-					cachedInputTokens: 0,
-					outputTokens: 0,
-					reasoningOutputTokens: 0,
-				},
-				last: {
-					totalTokens: 50,
-					inputTokens: 50,
-					cachedInputTokens: 0,
-					outputTokens: 0,
-					reasoningOutputTokens: 0,
-				},
-				modelContextWindow: 0,
-			}),
-		);
-		if (!display) throw new Error("expected display");
-		expect(display.percentage).toBe(0);
-	});
-
-	it("returns null when neither shape matches", () => {
-		// Has `total` object but no `modelContextWindow` → not Codex.
-		// Has no `categories` array → not Claude.
+	it("returns null when used or max is missing", () => {
 		expect(
-			parseContextUsageMeta(JSON.stringify({ total: { totalTokens: 5 } })),
+			parseStoredMeta(JSON.stringify({ modelId: "m", usedTokens: 100 })),
+		).toBeNull();
+		expect(
+			parseStoredMeta(JSON.stringify({ modelId: "m", maxTokens: 1000 })),
 		).toBeNull();
 	});
+});
 
-	describe("clamping (used <= max, percentage <= 100)", () => {
-		// SDK can briefly report >100% during autocompact transitions when
-		// maxTokens shifts mid-flight. The ring must never render >100%.
-		it("clamps Claude used + percentage", () => {
-			const display = parseContextUsageMeta(
-				JSON.stringify({
-					totalTokens: 250000,
-					maxTokens: 200000,
-					percentage: 125,
-					categories: [{ name: "Messages", tokens: 200000 }],
-				}),
-			);
-			if (!display || display.source !== "claude") {
-				throw new Error("expected claude");
-			}
-			expect(display.used).toBe(200000);
-			expect(display.percentage).toBe(100);
-		});
-
-		it("clamps Codex used + percentage", () => {
-			// Pathological: last.totalTokens > modelContextWindow.
-			const display = parseContextUsageMeta(
-				JSON.stringify({
-					total: {
-						totalTokens: 1100000,
-						inputTokens: 1100000,
-						cachedInputTokens: 0,
-						outputTokens: 0,
-						reasoningOutputTokens: 0,
-					},
-					last: {
-						totalTokens: 1100000,
-						inputTokens: 1100000,
-						cachedInputTokens: 0,
-						outputTokens: 0,
-						reasoningOutputTokens: 0,
-					},
-					modelContextWindow: 1000000,
-				}),
-			);
-			if (!display || display.source !== "codex") {
-				throw new Error("expected codex");
-			}
-			expect(display.used).toBe(1000000);
-			expect(display.percentage).toBe(100);
-			// Underlying breakdown not clamped — only the displayed top-line.
-			expect(display.last.total).toBe(1100000);
+describe("parseClaudeRichMeta", () => {
+	it("parses the rich shape including modelId", () => {
+		const rich = parseClaudeRichMeta(
+			JSON.stringify({
+				modelId: CLAUDE_MODEL,
+				usedTokens: 1500,
+				maxTokens: 200_000,
+				percentage: 0.75,
+				isAutoCompactEnabled: true,
+				categories: [{ name: "Messages", tokens: 800 }],
+			}),
+		);
+		expect(rich).toEqual({
+			modelId: CLAUDE_MODEL,
+			usedTokens: 1500,
+			maxTokens: 200_000,
+			percentage: 0.75,
+			isAutoCompactEnabled: true,
+			categories: [{ name: "Messages", tokens: 800 }],
 		});
 	});
 
-	describe("autoCompacts", () => {
-		it("Claude: surfaces isAutoCompactEnabled", () => {
-			const display = parseContextUsageMeta(
-				JSON.stringify({
-					totalTokens: 100,
-					maxTokens: 1000,
-					percentage: 10,
-					isAutoCompactEnabled: true,
-					categories: [],
-				}),
-			);
-			if (!display || display.source !== "claude") {
-				throw new Error("expected claude");
-			}
-			expect(display.autoCompacts).toBe(true);
-		});
+	it("returns null on malformed input", () => {
+		expect(parseClaudeRichMeta(null)).toBeNull();
+		expect(parseClaudeRichMeta("{}")).toBeNull();
+		expect(parseClaudeRichMeta('{"usedTokens": 100}')).toBeNull();
+	});
+});
 
-		it("Claude: defaults to false when field missing", () => {
-			const display = parseContextUsageMeta(
-				JSON.stringify({
-					totalTokens: 100,
-					maxTokens: 1000,
-					percentage: 10,
-					categories: [],
-				}),
-			);
-			if (!display || display.source !== "claude") {
-				throw new Error("expected claude");
-			}
-			expect(display.autoCompacts).toBe(false);
+describe("resolveContextUsageDisplay", () => {
+	const baselineClaude: StoredContextUsageMeta = {
+		modelId: CLAUDE_MODEL,
+		usedTokens: 50_000,
+		maxTokens: 200_000,
+		percentage: 25,
+	};
+
+	it("returns `empty` when baseline + rich are both null", () => {
+		expect(resolveContextUsageDisplay(null, null, CLAUDE_MODEL)).toEqual({
+			kind: "empty",
 		});
+	});
+
+	it("returns `full` when baseline model matches composer", () => {
+		const res = resolveContextUsageDisplay(baselineClaude, null, CLAUDE_MODEL);
+		expect(res).toEqual({
+			kind: "full",
+			modelId: CLAUDE_MODEL,
+			usedTokens: 50_000,
+			maxTokens: 200_000,
+			percentage: 25,
+			tier: "default",
+			rich: null,
+		});
+	});
+
+	it("returns `tokensOnly` when composer switched to a different model", () => {
+		const res = resolveContextUsageDisplay(
+			baselineClaude,
+			null,
+			"claude-sonnet-4-5",
+		);
+		expect(res).toEqual({
+			kind: "tokensOnly",
+			recordedModelId: CLAUDE_MODEL,
+			usedTokens: 50_000,
+		});
+	});
+
+	it("treats null composerModelId as match (avoids flash of tokensOnly during mount)", () => {
+		const res = resolveContextUsageDisplay(baselineClaude, null, null);
+		expect(res.kind).toBe("full");
+	});
+
+	it("legacy baseline (empty modelId) degrades to tokensOnly when composer has a model", () => {
+		const legacy: StoredContextUsageMeta = {
+			modelId: "",
+			usedTokens: 10_000,
+			maxTokens: 200_000,
+			percentage: 5,
+		};
+		const res = resolveContextUsageDisplay(legacy, null, CLAUDE_MODEL);
+		expect(res).toEqual({
+			kind: "tokensOnly",
+			recordedModelId: "",
+			usedTokens: 10_000,
+		});
+	});
+
+	it("rich overrides baseline values when both present and model matches", () => {
+		const rich: ClaudeRichContextUsage = {
+			modelId: CLAUDE_MODEL,
+			usedTokens: 60_000,
+			maxTokens: 200_000,
+			percentage: 30,
+			isAutoCompactEnabled: true,
+			categories: [{ name: "Messages", tokens: 60_000 }],
+		};
+		const res = resolveContextUsageDisplay(baselineClaude, rich, CLAUDE_MODEL);
+		expect(res.kind).toBe("full");
+		if (res.kind !== "full") throw new Error("unreachable");
+		expect(res.usedTokens).toBe(60_000);
+		expect(res.percentage).toBe(30);
+		expect(res.rich).toBe(rich);
+	});
+
+	it("computes ring tier from percentage", () => {
+		const near: StoredContextUsageMeta = {
+			...baselineClaude,
+			percentage: 85,
+		};
+		const res = resolveContextUsageDisplay(near, null, CLAUDE_MODEL);
+		if (res.kind !== "full") throw new Error("unreachable");
+		expect(res.tier).toBe("danger");
 	});
 });
 
@@ -286,23 +214,26 @@ describe("parseCodexRateLimits", () => {
 		expect(parseCodexRateLimits("{}")).toBeNull();
 	});
 
-	it("parses both windows with labels and reset times", () => {
+	it("parses wham/usage primary_window + secondary_window", () => {
 		const display = parseCodexRateLimits(
 			JSON.stringify({
-				primary: {
-					usedPercent: 27,
-					windowDurationMins: 300, // 5h
-					resetsAt: NOW + 3600,
+				plan_type: "pro",
+				rate_limit: {
+					primary_window: {
+						used_percent: 27,
+						limit_window_seconds: 18_000,
+						reset_at: NOW + 3600,
+					},
+					secondary_window: {
+						used_percent: 60,
+						limit_window_seconds: 604_800,
+						reset_at: NOW + 86_400,
+					},
 				},
-				secondary: {
-					usedPercent: 27,
-					windowDurationMins: 10080, // 7d
-					resetsAt: NOW + 86400,
-				},
+				credits: { has_credits: true, unlimited: false, balance: "10.50" },
 			}),
 			NOW,
 		);
-		expect(display).not.toBeNull();
 		expect(display?.primary).toEqual({
 			usedPercent: 27,
 			leftPercent: 73,
@@ -311,30 +242,66 @@ describe("parseCodexRateLimits", () => {
 			expired: false,
 		});
 		expect(display?.secondary?.label).toBe("7d limit");
-		expect(display?.secondary?.expired).toBe(false);
+		expect(display?.notes).toEqual([
+			{ label: "Plan", value: "Pro" },
+			{ label: "Credits", value: "$10.50" },
+		]);
 	});
 
-	it("marks expired windows when resetsAt is in the past", () => {
+	it("renders plan + zero credits when both windows are exhausted/null", () => {
 		const display = parseCodexRateLimits(
 			JSON.stringify({
-				primary: {
-					usedPercent: 50,
-					windowDurationMins: 300,
-					resetsAt: NOW - 1,
+				plan_type: "prolite",
+				rate_limit: { primary_window: null, secondary_window: null },
+				credits: { has_credits: false, unlimited: false, balance: "0" },
+			}),
+			NOW,
+		);
+		expect(display?.primary).toBeNull();
+		expect(display?.secondary).toBeNull();
+		expect(display?.notes).toEqual([
+			{ label: "Plan", value: "Prolite" },
+			{ label: "Credits", value: "$0.00" },
+		]);
+	});
+
+	it("treats unlimited credits as a sentinel string", () => {
+		const display = parseCodexRateLimits(
+			JSON.stringify({
+				plan_type: "team",
+				credits: { unlimited: true, has_credits: true },
+			}),
+			NOW,
+		);
+		expect(display?.notes).toEqual([
+			{ label: "Plan", value: "Team" },
+			{ label: "Credits", value: "Unlimited" },
+		]);
+	});
+
+	it("marks expired windows when reset_at is in the past", () => {
+		const display = parseCodexRateLimits(
+			JSON.stringify({
+				rate_limit: {
+					primary_window: {
+						used_percent: 50,
+						limit_window_seconds: 18_000,
+						reset_at: NOW - 1,
+					},
 				},
-				secondary: null,
 			}),
 			NOW,
 		);
 		expect(display?.primary?.expired).toBe(true);
-		expect(display?.secondary).toBeNull();
 	});
 
-	it("clamps usedPercent into 0-100 and computes leftPercent", () => {
+	it("clamps used_percent into 0-100 and computes leftPercent", () => {
 		const display = parseCodexRateLimits(
 			JSON.stringify({
-				primary: { usedPercent: -10, windowDurationMins: 60 },
-				secondary: { usedPercent: 150, windowDurationMins: 60 },
+				rate_limit: {
+					primary_window: { used_percent: -10, limit_window_seconds: 3600 },
+					secondary_window: { used_percent: 150, limit_window_seconds: 3600 },
+				},
 			}),
 			NOW,
 		);
@@ -344,24 +311,121 @@ describe("parseCodexRateLimits", () => {
 		expect(display?.secondary?.leftPercent).toBe(0);
 	});
 
-	it("returns null when neither window is present", () => {
+	it("returns null when no windows / plan / credits are usable", () => {
 		expect(
 			parseCodexRateLimits(
-				JSON.stringify({ primary: null, secondary: null }),
+				JSON.stringify({ rate_limit: { primary_window: null } }),
 				NOW,
 			),
 		).toBeNull();
 	});
 
-	it("falls back to null label when windowDurationMins is missing", () => {
+	it("falls back to legacy CLI-pushed shape (camelCase root)", () => {
 		const display = parseCodexRateLimits(
 			JSON.stringify({
-				primary: { usedPercent: 5 },
-				secondary: null,
+				primary: {
+					usedPercent: 27,
+					windowDurationMins: 300,
+					resetsAt: NOW + 3600,
+				},
+				secondary: {
+					usedPercent: 60,
+					windowDurationMins: 10080,
+					resetsAt: NOW + 86_400,
+				},
+				planType: "plus",
 			}),
 			NOW,
 		);
-		expect(display?.primary?.label).toBeNull();
+		expect(display?.primary?.label).toBe("5h limit");
+		expect(display?.secondary?.label).toBe("7d limit");
+		expect(display?.notes).toEqual([{ label: "Plan", value: "Plus" }]);
+	});
+});
+
+describe("parseClaudeRateLimits", () => {
+	const NOW = 1_777_000_000;
+
+	it("returns null for missing / unparseable input", () => {
+		expect(parseClaudeRateLimits(null)).toBeNull();
+		expect(parseClaudeRateLimits("not json")).toBeNull();
+		expect(parseClaudeRateLimits("{}")).toBeNull();
+	});
+
+	it("parses five_hour + seven_day into primary/secondary", () => {
+		const display = parseClaudeRateLimits(
+			JSON.stringify({
+				five_hour: { utilization: 12 },
+				seven_day: { utilization: 30 },
+			}),
+			NOW,
+		);
+		expect(display?.primary?.usedPercent).toBe(12);
+		expect(display?.primary?.label).toBe("5h limit");
+		expect(display?.secondary?.usedPercent).toBe(30);
+		expect(display?.secondary?.label).toBe("7d limit");
+		expect(display?.extraWindows).toEqual([]);
+	});
+
+	it("collects every seven_day_* field into extraWindows", () => {
+		const display = parseClaudeRateLimits(
+			JSON.stringify({
+				five_hour: { utilization: 1 },
+				seven_day: { utilization: 2 },
+				seven_day_sonnet: { utilization: 3 },
+				seven_day_opus: { utilization: 4 },
+				seven_day_omelette: { utilization: 5 },
+				seven_day_cowork: { utilization: 6 },
+				seven_day_new_window: { utilization: 7 },
+			}),
+			NOW,
+		);
+
+		// Sorted by `id` (claude-cowork → claude-new-window → claude-omelette
+		// → claude-opus → claude-sonnet) so the popover order is stable
+		// across refetches.
+		expect(display?.extraWindows.map((entry) => entry.title)).toEqual([
+			"Daily Routines",
+			"New Window",
+			"Designs",
+			"Opus",
+			"Sonnet",
+		]);
+	});
+
+	it("parses ISO resets_at into unix seconds", () => {
+		const display = parseClaudeRateLimits(
+			JSON.stringify({
+				five_hour: {
+					utilization: 8,
+					resets_at: "2026-04-25T06:30:00.000Z",
+				},
+			}),
+			NOW,
+		);
+		expect(display?.primary?.resetsAt).toBe(
+			Math.floor(Date.parse("2026-04-25T06:30:00.000Z") / 1000),
+		);
+	});
+
+	it("skips windows with non-numeric utilization", () => {
+		const display = parseClaudeRateLimits(
+			JSON.stringify({
+				five_hour: { utilization: "bad" },
+				seven_day: { utilization: 50 },
+				seven_day_sonnet: { utilization: null },
+			}),
+			NOW,
+		);
+		expect(display?.primary).toBeNull();
+		expect(display?.secondary?.usedPercent).toBe(50);
+		expect(display?.extraWindows).toEqual([]);
+	});
+
+	it("returns null when no usable windows are present", () => {
+		expect(
+			parseClaudeRateLimits(JSON.stringify({ extra_usage: { foo: 1 } }), NOW),
+		).toBeNull();
 	});
 });
 

@@ -1,50 +1,78 @@
-// Parses the opaque `context_usage_meta` JSON. Claude shape has
-// `categories[]`; Codex shape has `total.totalTokens` + `modelContextWindow`.
-//
-// Codex semantics caveat: Codex's `total.*` is the THREAD'S CUMULATIVE
-// BILLED tokens — every turn re-sends the entire conversation history as
-// input, and `total` keeps adding it up turn after turn. So `total` blows
-// past `modelContextWindow` as the conversation grows even though the
-// actual context is small. The field that reflects current context fill
-// is `last.*` — `last.totalTokens` ≈ tokens occupied by the conversation
-// after the most recent turn (the input we'd send next + that turn's
-// output). This is what the ring shows as `used`.
+// Display-ready parsing for context usage and per-provider rate limits.
+// Percentages are only trusted when the stored model matches the composer.
 
-export type DisplayCategory = {
-	name: string;
-	tokens: number;
-	percentage: number;
+/** Baseline: written at turn end by both Claude and Codex. */
+export type StoredContextUsageMeta = {
+	readonly modelId: string;
+	readonly usedTokens: number;
+	readonly maxTokens: number;
+	readonly percentage: number;
 };
 
-export type CodexTokenBreakdown = {
-	total: number;
-	input: number;
-	cachedInput: number;
-	output: number;
-	reasoningOutput: number;
+/** Claude-only breakdown fetched live on hover. */
+export type ClaudeRichContextUsage = StoredContextUsageMeta & {
+	readonly isAutoCompactEnabled: boolean;
+	readonly categories: ReadonlyArray<{ name: string; tokens: number }>;
 };
 
-type BaseDisplay = {
-	used: number;
-	max: number;
-	percentage: number;
-};
+/** <60 default, 60–80 warning, >=80 danger. */
+export type RingTier = "default" | "warning" | "danger";
 
-export type ClaudeDisplay = BaseDisplay & {
-	source: "claude";
-	categories: DisplayCategory[];
-	/** Claude SDK option — when true, the agent reclaims context by
-	 *  summarising older turns once the window approaches full. */
-	autoCompacts: boolean;
-};
+export function ringTier(percentage: number): RingTier {
+	if (percentage >= 80) return "danger";
+	if (percentage >= 60) return "warning";
+	return "default";
+}
 
-export type CodexDisplay = BaseDisplay & {
-	source: "codex";
-	/** Most recent turn's breakdown — this is what fills the context window. */
-	last: CodexTokenBreakdown;
-};
+/** Ring display state. */
+export type DisplayResolution =
+	| { readonly kind: "empty" }
+	| {
+			readonly kind: "tokensOnly";
+			readonly recordedModelId: string;
+			readonly usedTokens: number;
+	  }
+	| {
+			readonly kind: "full";
+			readonly modelId: string;
+			readonly usedTokens: number;
+			readonly maxTokens: number;
+			readonly percentage: number;
+			readonly tier: RingTier;
+			readonly rich: ClaudeRichContextUsage | null;
+	  };
 
-export type ContextUsageDisplay = ClaudeDisplay | CodexDisplay;
+/** Rich overrides baseline; model mismatches degrade to tokens-only. */
+export function resolveContextUsageDisplay(
+	baseline: StoredContextUsageMeta | null,
+	rich: ClaudeRichContextUsage | null,
+	composerModelId: string | null,
+): DisplayResolution {
+	const effective = rich ?? baseline;
+	if (!effective) return { kind: "empty" };
+
+	const matches =
+		composerModelId === null || effective.modelId === composerModelId;
+	if (!matches) {
+		return {
+			kind: "tokensOnly",
+			recordedModelId: effective.modelId,
+			usedTokens: effective.usedTokens,
+		};
+	}
+
+	return {
+		kind: "full",
+		modelId: effective.modelId,
+		usedTokens: effective.usedTokens,
+		maxTokens: effective.maxTokens,
+		percentage: effective.percentage,
+		tier: ringTier(effective.percentage),
+		rich,
+	};
+}
+
+// ── JSON parsers ───────────────────────────────────────────────────────
 
 type Json = unknown;
 
@@ -58,14 +86,14 @@ function asObject(v: Json): Record<string, Json> | null {
 		: null;
 }
 
-function asArray(v: Json): Json[] | null {
-	return Array.isArray(v) ? v : null;
+function clampPercent(used: number, max: number): number {
+	if (max <= 0) return 0;
+	return Math.min(100, Math.max(0, (used / max) * 100));
 }
 
-/** Null for empty / unparseable / unknown shape. */
-export function parseContextUsageMeta(
+export function parseStoredMeta(
 	json: string | null | undefined,
-): ContextUsageDisplay | null {
+): StoredContextUsageMeta | null {
 	if (!json) return null;
 	let parsed: Json;
 	try {
@@ -75,92 +103,53 @@ export function parseContextUsageMeta(
 	}
 	const root = asObject(parsed);
 	if (!root) return null;
-
-	if (asArray(root.categories)) return parseClaude(root);
-	if (asObject(root.total) && asNumber(root.modelContextWindow) !== null) {
-		return parseCodex(root);
-	}
-	return null;
+	const used = asNumber(root.usedTokens);
+	const max = asNumber(root.maxTokens);
+	if (used === null || max === null) return null;
+	return {
+		modelId: typeof root.modelId === "string" ? root.modelId : "",
+		usedTokens: used,
+		maxTokens: max,
+		percentage: asNumber(root.percentage) ?? clampPercent(used, max),
+	};
 }
 
-function parseClaude(root: Record<string, Json>): ClaudeDisplay {
-	const max = asNumber(root.maxTokens) ?? 0;
-	const rawUsed = asNumber(root.totalTokens) ?? 0;
-	// Clamp: the SDK may briefly report >100% during autocompact transitions
-	// (maxTokens shifts as the threshold moves). A ring at 102% looks broken;
-	// pin to the window so the worst case is "100%".
-	const used = max > 0 ? Math.min(rawUsed, max) : rawUsed;
-	const sdkPct = asNumber(root.percentage);
-	const percentage = Math.min(sdkPct ?? computePercentage(used, max), 100);
-
-	const categories: DisplayCategory[] = [];
-	const rawCats = asArray(root.categories) ?? [];
-	for (const entry of rawCats) {
+export function parseClaudeRichMeta(
+	json: string | null | undefined,
+): ClaudeRichContextUsage | null {
+	if (!json) return null;
+	let parsed: Json;
+	try {
+		parsed = JSON.parse(json);
+	} catch {
+		return null;
+	}
+	const root = asObject(parsed);
+	if (!root) return null;
+	const used = asNumber(root.usedTokens);
+	const max = asNumber(root.maxTokens);
+	if (used === null || max === null) return null;
+	const rawCategories = Array.isArray(root.categories) ? root.categories : [];
+	const categories: Array<{ name: string; tokens: number }> = [];
+	for (const entry of rawCategories) {
 		const obj = asObject(entry);
 		if (!obj) continue;
 		const name = typeof obj.name === "string" ? obj.name : null;
-		const tokens = asNumber(obj.tokens) ?? 0;
-		if (!name) continue;
-		// "Free space" is the unallocated remainder — skip from the list.
-		if (name === "Free space") continue;
-		categories.push({
-			name,
-			tokens,
-			percentage: max > 0 ? (tokens / max) * 100 : 0,
-		});
+		const tokens = asNumber(obj.tokens);
+		if (!name || tokens === null) continue;
+		categories.push({ name, tokens });
 	}
-	categories.sort((a, b) => b.tokens - a.tokens);
-
 	return {
-		source: "claude",
-		used,
-		max,
-		percentage,
+		modelId: typeof root.modelId === "string" ? root.modelId : "",
+		usedTokens: used,
+		maxTokens: max,
+		percentage: asNumber(root.percentage) ?? clampPercent(used, max),
+		isAutoCompactEnabled: root.isAutoCompactEnabled === true,
 		categories,
-		autoCompacts: root.isAutoCompactEnabled === true,
 	};
 }
 
-function parseCodexBreakdown(
-	obj: Record<string, Json> | null,
-): CodexTokenBreakdown | null {
-	if (!obj) return null;
-	return {
-		total: asNumber(obj.totalTokens) ?? 0,
-		input: asNumber(obj.inputTokens) ?? 0,
-		cachedInput: asNumber(obj.cachedInputTokens) ?? 0,
-		output: asNumber(obj.outputTokens) ?? 0,
-		reasoningOutput: asNumber(obj.reasoningOutputTokens) ?? 0,
-	};
-}
-
-function parseCodex(root: Record<string, Json>): CodexDisplay {
-	// `last` is the source of truth for "how full is the context right now".
-	// Fall back to `total` only when `last` is missing (e.g. zero-turn
-	// session); for a single-turn thread `total === last` so they match.
-	const last = parseCodexBreakdown(asObject(root.last)) ??
-		parseCodexBreakdown(asObject(root.total)) ?? {
-			total: 0,
-			input: 0,
-			cachedInput: 0,
-			output: 0,
-			reasoningOutput: 0,
-		};
-	const max = asNumber(root.modelContextWindow) ?? 0;
-	const used = max > 0 ? Math.min(last.total, max) : last.total;
-	return {
-		source: "codex",
-		used,
-		max,
-		percentage: Math.min(computePercentage(used, max), 100),
-		last,
-	};
-}
-
-function computePercentage(used: number, max: number): number {
-	if (max <= 0) return 0;
-	return (used / max) * 100;
-}
+// ── Formatting helpers ────────────────────────────────────────────────
 
 /** "12.4k" / "1.0M" / "0". */
 export function formatTokens(tokens: number): string {
@@ -170,70 +159,245 @@ export function formatTokens(tokens: number): string {
 	return String(tokens);
 }
 
-/** <60 default, 60–80 warning, >=80 danger. */
-export type RingTier = "default" | "warning" | "danger";
-
-export function ringTier(percentage: number): RingTier {
-	if (percentage >= 80) return "danger";
-	if (percentage >= 60) return "warning";
-	return "default";
-}
-
-// ── Codex rate limits ───────────────────────────────────────────────────
-//
-// Stored as the raw `RateLimitSnapshot` JSON Codex sends. `primary` is the
-// short window (5h on most plans), `secondary` the long one (7d). Both
-// have `usedPercent` (0-100) and `resetsAt` (unix seconds).
+// ── Rate limits (orthogonal to context meta) ───────────────────────────
 
 export type RateLimitWindowDisplay = {
-	/** Tokens already consumed in this window. 0–100. */
 	usedPercent: number;
-	/** Tokens remaining = 100 - usedPercent, clamped 0–100. */
 	leftPercent: number;
-	/** Approximate length of the window for the label ("5h" / "7d") — null
-	 *  when Codex didn't include it. */
 	label: string | null;
-	/** Unix seconds when the window rolls over. Null if unknown. */
 	resetsAt: number | null;
-	/** True when `resetsAt` is in the past — Codex hasn't sent a fresh
-	 *  snapshot yet but the local clock says the window already rolled. */
 	expired: boolean;
 };
 
-export type CodexRateLimitsDisplay = {
+export type RateLimitSnapshotDisplay = {
 	primary: RateLimitWindowDisplay | null;
 	secondary: RateLimitWindowDisplay | null;
+	extraWindows: ReadonlyArray<{
+		id: string;
+		title: string;
+		window: RateLimitWindowDisplay;
+	}>;
+	/** Metadata-only rows shown beneath the windows (Plan, Credits, …). */
+	notes: ReadonlyArray<{ label: string; value: string }>;
 };
 
+const FIVE_HOUR_MINUTES = 5 * 60;
+const SEVEN_DAY_MINUTES = 7 * 24 * 60;
+
+/** Parse Codex's raw `wham/usage` body. Falls back to the legacy CLI
+ *  push shape (`primary` / `secondary` already camelCase) so a stale
+ *  cache from before the OAuth migration still renders something. */
 export function parseCodexRateLimits(
-	json: string | null | undefined,
+	value: Json | null | undefined,
 	now: number = Date.now() / 1000,
-): CodexRateLimitsDisplay | null {
-	if (!json) return null;
-	let parsed: Json;
-	try {
-		parsed = JSON.parse(json);
-	} catch {
+): RateLimitSnapshotDisplay | null {
+	const root = readJsonObject(value);
+	if (!root) return null;
+
+	const rateLimit = asObject(root.rate_limit) ?? asObject(root.rateLimit);
+	let primary = parseChatGptWindow(asObject(rateLimit?.primary_window), now);
+	let secondary = parseChatGptWindow(
+		asObject(rateLimit?.secondary_window),
+		now,
+	);
+	// Fall back to the old CLI push shape — primary/secondary at the root
+	// in camelCase. Only used to render a cache leftover gracefully; the
+	// next active fetch overwrites the body in this shape.
+	if (!primary) primary = parseCamelWindow(asObject(root.primary), now);
+	if (!secondary) secondary = parseCamelWindow(asObject(root.secondary), now);
+
+	const extraWindows = parseCamelExtraWindows(root.extraWindows, now);
+	const notes = parseCodexNotes(root);
+	if (
+		!primary &&
+		!secondary &&
+		extraWindows.length === 0 &&
+		notes.length === 0
+	) {
 		return null;
 	}
-	const root = asObject(parsed);
-	if (!root) return null;
-	const primary = parseWindow(asObject(root.primary), now);
-	const secondary = parseWindow(asObject(root.secondary), now);
-	if (!primary && !secondary) return null;
-	return { primary, secondary };
+	return { primary, secondary, extraWindows, notes };
 }
 
-function parseWindow(
+function parseCodexNotes(
+	root: Record<string, Json>,
+): RateLimitSnapshotDisplay["notes"] {
+	const notes: Array<{ label: string; value: string }> = [];
+
+	const planRaw = root.plan_type ?? root.planType;
+	const planLabel = formatCodexPlan(planRaw);
+	if (planLabel) notes.push({ label: "Plan", value: planLabel });
+
+	const credits = asObject(root.credits);
+	if (credits) {
+		const unlimited = credits.unlimited === true;
+		const hasCredits =
+			credits.has_credits === true || credits.hasCredits === true;
+		if (unlimited) {
+			notes.push({ label: "Credits", value: "Unlimited" });
+		} else {
+			const balance = parseCreditsBalance(credits.balance);
+			if (balance !== null) {
+				notes.push({ label: "Credits", value: formatCredits(balance) });
+			} else if (hasCredits === false) {
+				notes.push({ label: "Credits", value: "$0.00" });
+			}
+		}
+	}
+
+	return notes;
+}
+
+function parseCreditsBalance(value: Json): number | null {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (typeof value === "string") {
+		const trimmed = value.trim();
+		if (trimmed.length === 0) return null;
+		const parsed = Number(trimmed);
+		return Number.isFinite(parsed) ? parsed : null;
+	}
+	return null;
+}
+
+function formatCredits(balance: number): string {
+	const safe = Math.max(0, balance);
+	return `$${safe.toFixed(2)}`;
+}
+
+function formatCodexPlan(value: Json): string | null {
+	if (typeof value !== "string") return null;
+	const trimmed = value.trim();
+	if (trimmed.length === 0) return null;
+	return trimmed
+		.split(/[_\s]+/)
+		.filter(Boolean)
+		.map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+		.join(" ");
+}
+
+function parseChatGptWindow(
+	obj: Record<string, Json> | null,
+	now: number,
+): RateLimitWindowDisplay | null {
+	if (!obj) return null;
+	const used = asNumber(obj.used_percent);
+	if (used === null) return null;
+	const seconds = asNumber(obj.limit_window_seconds);
+	const minutes = seconds !== null && seconds > 0 ? seconds / 60 : null;
+	const resetsAt = asNumber(obj.reset_at);
+	return buildWindow(used, minutes, resetsAt, now);
+}
+
+/** Parse Anthropic's raw `/api/oauth/usage` body. Fields stay snake_case
+ *  on the wire — we map them here, not in Rust, so adding a new window
+ *  upstream only takes a parser tweak (no DB migration). */
+export function parseClaudeRateLimits(
+	value: Json | null | undefined,
+	now: number = Date.now() / 1000,
+): RateLimitSnapshotDisplay | null {
+	const root = readJsonObject(value);
+	if (!root) return null;
+	const primary = parseAnthropicWindow(
+		asObject(root.five_hour),
+		FIVE_HOUR_MINUTES,
+		now,
+	);
+	const secondary = parseAnthropicWindow(
+		asObject(root.seven_day),
+		SEVEN_DAY_MINUTES,
+		now,
+	);
+	const extraWindows: Array<{
+		id: string;
+		title: string;
+		window: RateLimitWindowDisplay;
+	}> = [];
+	for (const [key, raw] of Object.entries(root)) {
+		const suffix = claudeExtraSuffix(key);
+		if (!suffix) continue;
+		const window = parseAnthropicWindow(asObject(raw), SEVEN_DAY_MINUTES, now);
+		if (!window) continue;
+		extraWindows.push({
+			id: `claude-${suffix.replace(/_/g, "-")}`,
+			title: humanizeClaudeSuffix(suffix),
+			window,
+		});
+	}
+	extraWindows.sort((a, b) => a.id.localeCompare(b.id));
+	if (!primary && !secondary && extraWindows.length === 0) return null;
+	return { primary, secondary, extraWindows, notes: [] };
+}
+
+function readJsonObject(
+	value: Json | null | undefined,
+): Record<string, Json> | null {
+	if (!value) return null;
+	let parsed: Json;
+	if (typeof value === "string") {
+		try {
+			parsed = JSON.parse(value);
+		} catch {
+			return null;
+		}
+	} else {
+		parsed = value;
+	}
+	return asObject(parsed);
+}
+
+function parseCamelExtraWindows(
+	value: Json,
+	now: number,
+): RateLimitSnapshotDisplay["extraWindows"] {
+	if (!Array.isArray(value)) return [];
+	const windows: Array<{
+		id: string;
+		title: string;
+		window: RateLimitWindowDisplay;
+	}> = [];
+	for (const entry of value) {
+		const obj = asObject(entry);
+		if (!obj) continue;
+		const id = typeof obj.id === "string" ? obj.id : null;
+		const title = typeof obj.title === "string" ? obj.title : null;
+		const window = parseCamelWindow(asObject(obj.window), now);
+		if (!id || !title || !window) continue;
+		windows.push({ id, title, window });
+	}
+	return windows;
+}
+
+function parseCamelWindow(
 	obj: Record<string, Json> | null,
 	now: number,
 ): RateLimitWindowDisplay | null {
 	if (!obj) return null;
 	const used = asNumber(obj.usedPercent);
 	if (used === null) return null;
-	const usedClamped = Math.max(0, Math.min(100, used));
 	const minutes = asNumber(obj.windowDurationMins);
 	const resetsAt = asNumber(obj.resetsAt);
+	return buildWindow(used, minutes, resetsAt, now);
+}
+
+function parseAnthropicWindow(
+	obj: Record<string, Json> | null,
+	minutes: number,
+	now: number,
+): RateLimitWindowDisplay | null {
+	if (!obj) return null;
+	const used = asNumber(obj.utilization);
+	if (used === null) return null;
+	const resetsAt = parseAnthropicResetsAt(obj.resets_at);
+	return buildWindow(used, minutes, resetsAt, now);
+}
+
+function buildWindow(
+	used: number,
+	minutes: number | null,
+	resetsAt: number | null,
+	now: number,
+): RateLimitWindowDisplay {
+	const usedClamped = Math.max(0, Math.min(100, used));
 	return {
 		usedPercent: usedClamped,
 		leftPercent: 100 - usedClamped,
@@ -241,6 +405,29 @@ function parseWindow(
 		resetsAt,
 		expired: resetsAt !== null && resetsAt < now,
 	};
+}
+
+function parseAnthropicResetsAt(value: Json): number | null {
+	if (typeof value !== "string" || value.trim().length === 0) return null;
+	const ms = Date.parse(value);
+	return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+function claudeExtraSuffix(key: string): string | null {
+	if (!key.startsWith("seven_day_")) return null;
+	return key.slice("seven_day_".length);
+}
+
+function humanizeClaudeSuffix(suffix: string): string {
+	if (suffix === "sonnet") return "Sonnet";
+	if (suffix === "opus") return "Opus";
+	if (suffix === "omelette") return "Designs";
+	if (suffix === "cowork") return "Daily Routines";
+	return suffix
+		.split("_")
+		.filter(Boolean)
+		.map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+		.join(" ");
 }
 
 function formatWindowLabel(minutes: number | null): string | null {

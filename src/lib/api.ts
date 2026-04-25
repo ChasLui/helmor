@@ -23,11 +23,11 @@ export type WorkspaceState =
 	| "archived";
 
 /**
- * Mirror of the Rust `DerivedStatus` enum
- * (`src-tauri/src/workspace/derived_status.rs`). Drives the sidebar kanban
+ * Mirror of the Rust `WorkspaceStatus` enum
+ * (`src-tauri/src/workspace/status.rs`). Drives the sidebar kanban
  * lanes and PR-driven auto-status transitions.
  */
-export type DerivedStatus =
+export type WorkspaceStatus =
 	| "in-progress"
 	| "done"
 	| "review"
@@ -62,8 +62,7 @@ export type WorkspaceRow = {
 	hasUnread?: boolean;
 	workspaceUnread?: number;
 	unreadSessionCount?: number;
-	derivedStatus?: DerivedStatus;
-	manualStatus?: DerivedStatus | null;
+	status?: WorkspaceStatus;
 	branch?: string | null;
 	activeSessionId?: string | null;
 	activeSessionTitle?: string | null;
@@ -73,6 +72,9 @@ export type WorkspaceRow = {
 	pinnedAt?: string | null;
 	sessionCount?: number;
 	messageCount?: number;
+	/** ISO-8601 timestamp — present for rows coming from the backend; absent
+	 * for ad-hoc optimistic rows that haven't been given one. */
+	createdAt?: string;
 };
 
 export type WorkspaceGroup = {
@@ -136,23 +138,26 @@ export type WorkspaceSummary = {
 	hasUnread: boolean;
 	workspaceUnread: number;
 	unreadSessionCount: number;
-	derivedStatus: DerivedStatus;
-	manualStatus?: DerivedStatus | null;
+	status: WorkspaceStatus;
 	branch?: string | null;
 	activeSessionId?: string | null;
 	activeSessionTitle?: string | null;
 	activeSessionAgentType?: string | null;
 	activeSessionStatus?: string | null;
 	prTitle?: string | null;
+	pinnedAt?: string | null;
 	sessionCount?: number;
 	messageCount?: number;
+	createdAt: string;
 };
 
 export type RepositoryCreateOption = {
 	id: string;
 	name: string;
 	remote?: string | null;
+	remoteUrl?: string | null;
 	defaultBranch?: string | null;
+	forgeProvider?: ForgeProvider | null;
 	repoIconSrc?: string | null;
 	repoInitials?: string | null;
 };
@@ -229,6 +234,76 @@ export type GithubRepositorySummary = {
 	pushedAt?: string | null;
 };
 
+export type ForgeProvider = "github" | "gitlab" | "unknown";
+
+export type ForgeLabels = {
+	providerName: string;
+	cliName: string;
+	changeRequestName: string;
+	changeRequestFullName: string;
+	installAction: string;
+	connectAction: string;
+};
+
+export type ForgeCliStatus =
+	| {
+			status: "ready";
+			provider: ForgeProvider;
+			host: string;
+			cliName: string;
+			login: string;
+			version: string;
+			message: string;
+	  }
+	| {
+			status: "missing";
+			provider: ForgeProvider;
+			host: string;
+			cliName: string;
+			message: string;
+			installCommand?: string | null;
+	  }
+	| {
+			status: "unauthenticated";
+			provider: ForgeProvider;
+			host: string;
+			cliName: string;
+			version?: string | null;
+			message: string;
+			loginCommand: string;
+	  }
+	| {
+			status: "error";
+			provider: ForgeProvider;
+			host: string;
+			cliName: string;
+			version?: string | null;
+			message: string;
+	  };
+
+export type ForgeDetectionSignal = {
+	/** Layer that produced this signal (wellKnownHost, hostPattern, urlPath, repoFile, httpProbe, cliProbe). */
+	layer: string;
+	/** Short human-readable explanation shown in the UI tooltip. */
+	detail: string;
+};
+
+export type ForgeDetection = {
+	provider: ForgeProvider;
+	host?: string | null;
+	namespace?: string | null;
+	repo?: string | null;
+	remoteUrl?: string | null;
+	labels: ForgeLabels;
+	cli?: ForgeCliStatus | null;
+	/**
+	 * Signals that caused the current provider classification. Empty when
+	 * the provider is `unknown` or when the result came from the cached
+	 * `forge_provider` column (stored at repo-creation time).
+	 */
+	detectionSignals: ForgeDetectionSignal[];
+};
+
 export type AddRepositoryResponse = {
 	repositoryId: string;
 	createdRepository: boolean;
@@ -253,8 +328,7 @@ export type WorkspaceDetail = {
 	hasUnread: boolean;
 	workspaceUnread: number;
 	unreadSessionCount: number;
-	derivedStatus: DerivedStatus;
-	manualStatus?: DerivedStatus | null;
+	status: WorkspaceStatus;
 	activeSessionId?: string | null;
 	activeSessionTitle?: string | null;
 	activeSessionAgentType?: string | null;
@@ -301,6 +375,7 @@ export type RestoreWorkspaceResponse = {
 	 * instead. The frontend uses this to surface an informational toast so
 	 * the rename never happens silently. */
 	branchRename: { original: string; actual: string } | null;
+	restoredFromTargetBranch: string | null;
 };
 
 export type ArchiveWorkspaceResponse = {
@@ -493,6 +568,60 @@ export async function listGithubAccessibleRepositories(): Promise<
 	}
 }
 
+export async function getWorkspaceForge(
+	workspaceId: string,
+): Promise<ForgeDetection> {
+	try {
+		return await invoke<ForgeDetection>("get_workspace_forge", { workspaceId });
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to load workspace forge."),
+		);
+	}
+}
+
+export async function getForgeCliStatus(
+	provider: ForgeProvider,
+	host?: string | null,
+): Promise<ForgeCliStatus> {
+	try {
+		return await invoke<ForgeCliStatus>("get_forge_cli_status", {
+			provider,
+			host,
+		});
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to load forge CLI state."),
+		);
+	}
+}
+
+export async function installForgeCli(
+	provider: ForgeProvider,
+): Promise<ForgeCliStatus> {
+	try {
+		return await invoke<ForgeCliStatus>("install_forge_cli", { provider });
+	} catch (error) {
+		throw new Error(describeInvokeError(error, "Unable to install forge CLI."));
+	}
+}
+
+export async function openForgeCliAuthTerminal(
+	provider: ForgeProvider,
+	host?: string | null,
+): Promise<void> {
+	try {
+		return await invoke<void>("open_forge_cli_auth_terminal", {
+			provider,
+			host,
+		});
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to open forge CLI auth terminal."),
+		);
+	}
+}
+
 export async function loadDataInfo(): Promise<DataInfo | null> {
 	try {
 		return await invoke<DataInfo>("get_data_info");
@@ -644,6 +773,7 @@ export type SlashCommandEntry = {
 	name: string;
 	description: string;
 	argumentHint?: string | null;
+	providers?: AgentProvider[] | null;
 	/**
 	 * - `builtin` / `skill`: command is forwarded to the agent SDK as text.
 	 * - `client-action`: selecting the entry runs a host-app handler instead
@@ -833,10 +963,10 @@ export type UiMutationEvent =
 	| { type: "workspaceChanged"; workspaceId: string }
 	| { type: "sessionListChanged"; workspaceId: string }
 	| { type: "contextUsageChanged"; sessionId: string }
-	| { type: "codexRateLimitsChanged" }
 	| { type: "workspaceFilesChanged"; workspaceId: string }
 	| { type: "workspaceGitStateChanged"; workspaceId: string }
-	| { type: "workspacePrChanged"; workspaceId: string }
+	| { type: "workspaceForgeChanged"; workspaceId: string }
+	| { type: "workspaceChangeRequestChanged"; workspaceId: string }
 	| { type: "repositoryListChanged" }
 	| { type: "repositoryChanged"; repoId: string }
 	| { type: "settingsChanged"; key: string | null }
@@ -1008,6 +1138,12 @@ export async function openWorkspaceInEditor(
 	await invoke("open_workspace_in_editor", { workspaceId, editor });
 }
 
+export async function openWorkspaceInFinder(
+	workspaceId: string,
+): Promise<void> {
+	await invoke("open_workspace_in_finder", { workspaceId });
+}
+
 export async function readEditorFile(
 	path: string,
 ): Promise<EditorFileReadResponse> {
@@ -1172,7 +1308,7 @@ export async function unstageWorkspaceFile(
 	}
 }
 
-export type PullRequestInfo = {
+export type ChangeRequestInfo = {
 	url: string;
 	number: number;
 	state: "OPEN" | "CLOSED" | "MERGED" | string;
@@ -1181,7 +1317,7 @@ export type PullRequestInfo = {
 };
 
 export type ActionStatusKind = "success" | "pending" | "running" | "failure";
-export type ActionProvider = "github" | "vercel" | "unknown";
+export type ActionProvider = "github" | "gitlab" | "vercel" | "unknown";
 export type WorkspaceGitSyncStatus = "upToDate" | "behind" | "unknown";
 export type WorkspacePushStatus = "published" | "unpublished" | "unknown";
 
@@ -1213,7 +1349,13 @@ export type PushWorkspaceToRemoteResponse = {
 	headCommit: string;
 };
 
-export type WorkspacePrActionItem = {
+export type ContinueWorkspaceResponse = {
+	branch: string;
+	targetBranch: string;
+	startPoint: string;
+};
+
+export type ForgeActionItem = {
 	id: string;
 	name: string;
 	provider: ActionProvider;
@@ -1222,34 +1364,28 @@ export type WorkspacePrActionItem = {
 	url?: string | null;
 };
 
-export type WorkspacePrActionStatus = {
-	pr: PullRequestInfo | null;
+export type ForgeActionStatus = {
+	changeRequest: ChangeRequestInfo | null;
 	reviewDecision?: string | null;
 	mergeable?: string | null;
-	deployments: WorkspacePrActionItem[];
-	checks: WorkspacePrActionItem[];
-	remoteState: "ok" | "noPr" | "unavailable" | "error";
+	deployments: ForgeActionItem[];
+	checks: ForgeActionItem[];
+	remoteState: "ok" | "noPr" | "unauthenticated" | "unavailable" | "error";
 	message?: string | null;
 };
 
-/**
- * Look up the most recent pull request on GitHub whose head ref matches the
- * workspace's current branch. Returns `null` when there's no matching PR, the
- * workspace has no github.com remote, the user isn't connected to GitHub, or
- * the stored access token has been revoked. Only throws for unexpected
- * transport / parse failures.
- */
-export async function lookupWorkspacePr(
+export async function refreshWorkspaceChangeRequest(
 	workspaceId: string,
-): Promise<PullRequestInfo | null> {
+): Promise<ChangeRequestInfo | null> {
 	try {
-		const result = await invoke<PullRequestInfo | null>("lookup_workspace_pr", {
-			workspaceId,
-		});
+		const result = await invoke<ChangeRequestInfo | null>(
+			"refresh_workspace_change_request",
+			{ workspaceId },
+		);
 		return result ?? null;
 	} catch (error) {
 		throw new Error(
-			describeInvokeError(error, "Unable to look up workspace PR."),
+			describeInvokeError(error, "Unable to refresh change request."),
 		);
 	}
 }
@@ -1297,27 +1433,27 @@ export async function pushWorkspaceToRemote(
 	}
 }
 
-export async function loadWorkspacePrActionStatus(
+export async function loadWorkspaceForgeActionStatus(
 	workspaceId: string,
-): Promise<WorkspacePrActionStatus> {
+): Promise<ForgeActionStatus> {
 	try {
-		return await invoke<WorkspacePrActionStatus>(
-			"get_workspace_pr_action_status",
+		return await invoke<ForgeActionStatus>(
+			"get_workspace_forge_action_status",
 			{ workspaceId },
 		);
 	} catch (error) {
 		throw new Error(
-			describeInvokeError(error, "Unable to load workspace PR status."),
+			describeInvokeError(error, "Unable to load workspace forge status."),
 		);
 	}
 }
 
-export async function getWorkspacePrCheckInsertText(
+export async function getWorkspaceForgeCheckInsertText(
 	workspaceId: string,
 	itemId: string,
 ): Promise<string> {
 	try {
-		return await invoke<string>("get_workspace_pr_check_insert_text", {
+		return await invoke<string>("get_workspace_forge_check_insert_text", {
 			workspaceId,
 			itemId,
 		});
@@ -1328,42 +1464,51 @@ export async function getWorkspacePrCheckInsertText(
 	}
 }
 
-/**
- * Merge the workspace's open PR via GitHub GraphQL `mergePullRequest`.
- * Returns the refreshed PR info on success, `null` if no PR / not connected.
- */
-export async function mergeWorkspacePr(
+export async function mergeWorkspaceChangeRequest(
 	workspaceId: string,
-): Promise<PullRequestInfo | null> {
+): Promise<ChangeRequestInfo | null> {
 	try {
 		return (
-			(await invoke<PullRequestInfo | null>("merge_workspace_pr", {
-				workspaceId,
-			})) ?? null
+			(await invoke<ChangeRequestInfo | null>(
+				"merge_workspace_change_request",
+				{ workspaceId },
+			)) ?? null
 		);
 	} catch (error) {
 		throw new Error(
-			describeInvokeError(error, "Unable to merge workspace PR."),
+			describeInvokeError(error, "Unable to merge change request."),
 		);
 	}
 }
 
-/**
- * Close the workspace's open PR via GitHub GraphQL `closePullRequest`.
- * Returns the refreshed PR info on success, `null` if no PR / not connected.
- */
-export async function closeWorkspacePr(
+export async function closeWorkspaceChangeRequest(
 	workspaceId: string,
-): Promise<PullRequestInfo | null> {
+): Promise<ChangeRequestInfo | null> {
 	try {
 		return (
-			(await invoke<PullRequestInfo | null>("close_workspace_pr", {
-				workspaceId,
-			})) ?? null
+			(await invoke<ChangeRequestInfo | null>(
+				"close_workspace_change_request",
+				{ workspaceId },
+			)) ?? null
 		);
 	} catch (error) {
 		throw new Error(
-			describeInvokeError(error, "Unable to close workspace PR."),
+			describeInvokeError(error, "Unable to close change request."),
+		);
+	}
+}
+
+export async function continueWorkspaceFromTargetBranch(
+	workspaceId: string,
+): Promise<ContinueWorkspaceResponse> {
+	try {
+		return await invoke<ContinueWorkspaceResponse>(
+			"continue_workspace_from_target_branch",
+			{ workspaceId },
+		);
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to continue workspace."),
 		);
 	}
 }
@@ -1493,7 +1638,7 @@ export async function prepareWorkspaceFromRepo(
 
 /**
  * Phase 2 of workspace creation. Slow (~200ms-2s): creates the git
- * worktree, scaffolds `.context`, probes `helmor.json`, and flips the
+ * worktree, probes `helmor.json`, and flips the
  * workspace row from `initializing` to `ready` / `setup_pending`. On
  * failure, the workspace row is cleaned up automatically.
  */
@@ -1558,11 +1703,11 @@ export async function unpinWorkspace(workspaceId: string): Promise<void> {
 	return invoke<void>("unpin_workspace", { workspaceId });
 }
 
-export async function setWorkspaceManualStatus(
+export async function setWorkspaceStatus(
 	workspaceId: string,
-	status: DerivedStatus | null,
+	status: WorkspaceStatus,
 ): Promise<void> {
-	return invoke<void>("set_workspace_manual_status", { workspaceId, status });
+	return invoke<void>("set_workspace_status", { workspaceId, status });
 }
 
 // ---------------------------------------------------------------------------
@@ -1638,7 +1783,8 @@ export type TodoListPart = {
 };
 export type ImageSource =
 	| { kind: "base64"; data: string }
-	| { kind: "url"; url: string };
+	| { kind: "url"; url: string }
+	| { kind: "file"; path: string };
 export type ImagePart = {
 	type: "image";
 	id: string;
@@ -1794,6 +1940,14 @@ export async function savePastedImage(
 	return invoke<string>("save_pasted_image", { data, mediaType });
 }
 
+export async function showImageInFinder(path: string): Promise<void> {
+	await invoke("show_image_in_finder", { path });
+}
+
+export async function copyImageToClipboard(path: string): Promise<void> {
+	await invoke("copy_image_to_clipboard", { path });
+}
+
 /**
  * Start an agent message stream.
  *
@@ -1921,7 +2075,7 @@ export type ConductorWorkspace = {
 	directoryName: string;
 	state: string;
 	branch: string | null;
-	derivedStatus: string | null;
+	status: string | null;
 	prTitle: string | null;
 	sessionCount: number;
 	messageCount: number;
@@ -2048,6 +2202,35 @@ export async function getCodexRateLimits(): Promise<string | null> {
 	return await invoke<string | null>("get_codex_rate_limits");
 }
 
+/** Read the account-global Claude rate-limit snapshot. The string is
+ *  the raw Anthropic `/api/oauth/usage` response body — parsed on the
+ *  frontend via `parseClaudeRateLimits`. Null when no fetch has ever
+ *  succeeded (no cache, latest fetch failed). */
+export async function getClaudeRateLimits(): Promise<string | null> {
+	return await invoke<string | null>("get_claude_rate_limits");
+}
+
+/** Live Claude-only context-usage fetch for the hover popover. Pure
+ *  passthrough to the sidecar — no DB read. `model` is required because
+ *  the sidecar stamps it into the returned rich meta (used for the
+ *  model-match check in the ring). Returns slim JSON (never null;
+ *  errors throw). */
+export async function getLiveContextUsage(params: {
+	sessionId: string;
+	providerSessionId: string | null;
+	model: string;
+	cwd: string | null;
+}): Promise<string> {
+	return await invoke<string>("get_live_context_usage", {
+		request: {
+			sessionId: params.sessionId,
+			providerSessionId: params.providerSessionId,
+			model: params.model,
+			cwd: params.cwd,
+		},
+	});
+}
+
 export async function unhideSession(sessionId: string): Promise<void> {
 	await invoke("unhide_session", { sessionId });
 }
@@ -2077,6 +2260,8 @@ export type RepoScripts = {
 	setupFromProject: boolean;
 	runFromProject: boolean;
 	archiveFromProject: boolean;
+	/** Auto-run the setup script on workspace creation. Defaults to true. */
+	autoRunSetup: boolean;
 };
 
 export type RepoPreferences = {
@@ -2129,6 +2314,13 @@ export async function updateRepoScripts(
 		runScript,
 		archiveScript,
 	});
+}
+
+export async function updateRepoAutoRunSetup(
+	repoId: string,
+	enabled: boolean,
+): Promise<void> {
+	await invoke("update_repo_auto_run_setup", { repoId, enabled });
 }
 
 export async function loadRepoPreferences(

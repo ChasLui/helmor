@@ -350,6 +350,75 @@ fn run_migrations(connection: &Connection) -> Result<()> {
             .context("Failed to add context_usage_meta column")?;
     }
 
+    // Migration: toggle for auto-running the setup script on workspace
+    // creation. Default 1 (on) — preserves the pre-feature behavior for
+    // existing repos and is the most common case. Users opt out per-repo
+    // when they prefer to run setup manually from the inspector.
+    // Nullable so the conductor-import path (which copies rows without
+    // specifying this column) can leave it NULL; reads treat NULL as on.
+    if has_table(connection, "repos") && !has_column(connection, "repos", "auto_run_setup") {
+        connection
+            .execute_batch("ALTER TABLE repos ADD COLUMN auto_run_setup INTEGER DEFAULT 1")
+            .context("Failed to add auto_run_setup column")?;
+    }
+
+    // Migration: forge_provider — cached classification of the repo's
+    // remote ("github" / "gitlab" / "unknown"). Set once at repo-creation
+    // time by the layered detector in `crate::forge`. Legacy rows stay
+    // NULL and the loader re-runs detection on demand.
+    if has_table(connection, "repos") && !has_column(connection, "repos", "forge_provider") {
+        connection
+            .execute_batch("ALTER TABLE repos ADD COLUMN forge_provider TEXT")
+            .context("Failed to add forge_provider column")?;
+    }
+
+    if has_table(connection, "workspaces") && !has_column(connection, "workspaces", "pr_sync_state")
+    {
+        connection
+            .execute_batch("ALTER TABLE workspaces ADD COLUMN pr_sync_state TEXT DEFAULT 'none'")
+            .context("Failed to add pr_sync_state column")?;
+    }
+
+    let had_workspace_status =
+        has_table(connection, "workspaces") && has_column(connection, "workspaces", "status");
+    if has_table(connection, "workspaces") && !had_workspace_status {
+        connection
+            .execute_batch("ALTER TABLE workspaces ADD COLUMN status TEXT DEFAULT 'in-progress'")
+            .context("Failed to add workspace status column")?;
+    }
+    if has_table(connection, "workspaces") {
+        let legacy_status_expr = if has_column(connection, "workspaces", "manual_status")
+            && has_column(connection, "workspaces", "derived_status")
+        {
+            "COALESCE(NULLIF(manual_status, ''), NULLIF(derived_status, ''), 'in-progress')"
+        } else if has_column(connection, "workspaces", "derived_status") {
+            "COALESCE(NULLIF(derived_status, ''), 'in-progress')"
+        } else {
+            "'in-progress'"
+        };
+        connection
+            .execute_batch(&format!(
+                "UPDATE workspaces SET status = {legacy_status_expr} WHERE {}",
+                if had_workspace_status {
+                    "status IS NULL OR status = ''"
+                } else {
+                    "1 = 1"
+                }
+            ))
+            .context("Failed to backfill workspace status")?;
+
+        if has_column(connection, "workspaces", "manual_status") {
+            connection
+                .execute_batch("ALTER TABLE workspaces DROP COLUMN manual_status")
+                .context("Failed to drop workspace manual_status column")?;
+        }
+        if has_column(connection, "workspaces", "derived_status") {
+            connection
+                .execute_batch("ALTER TABLE workspaces DROP COLUMN derived_status")
+                .context("Failed to drop workspace derived_status column")?;
+        }
+    }
+
     drop_dead_schema(connection)?;
 
     // Migration: remap legacy "opus-1m" model ID — the CLI no longer accepts it.
@@ -379,6 +448,8 @@ CREATE TABLE IF NOT EXISTS repos (
     hidden INTEGER DEFAULT 0,
     custom_prompt_fix_errors TEXT,
     custom_prompt_resolve_merge_conflicts TEXT,
+    auto_run_setup INTEGER DEFAULT 1,
+    forge_provider TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -407,13 +478,13 @@ CREATE TABLE IF NOT EXISTS workspaces (
     active_session_id TEXT,
     branch TEXT,
     state TEXT DEFAULT 'active',
-    derived_status TEXT DEFAULT 'in-progress',
-    manual_status TEXT,
+    status TEXT DEFAULT 'in-progress',
     unread INTEGER DEFAULT 0,
     initialization_parent_branch TEXT,
     pinned_at TEXT,
     intended_target_branch TEXT,
     pr_title TEXT,
+    pr_sync_state TEXT DEFAULT 'none',
     archive_commit TEXT,
     linked_directory_paths TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -998,6 +1069,26 @@ mod tests {
         let (connection, _dir) = open_test_db();
         ensure_schema(&connection).unwrap();
         assert!(column_exists(&connection, "sessions", "context_usage_meta"));
+    }
+
+    #[test]
+    fn forge_provider_added_to_legacy_and_idempotent() {
+        let (connection, _dir) = open_test_db();
+        create_legacy_schema(&connection);
+        assert!(!column_exists(&connection, "repos", "forge_provider"));
+
+        run_migrations(&connection).unwrap();
+        assert!(column_exists(&connection, "repos", "forge_provider"));
+
+        run_migrations(&connection).unwrap();
+        assert!(column_exists(&connection, "repos", "forge_provider"));
+    }
+
+    #[test]
+    fn forge_provider_present_on_fresh_install() {
+        let (connection, _dir) = open_test_db();
+        ensure_schema(&connection).unwrap();
+        assert!(column_exists(&connection, "repos", "forge_provider"));
     }
 
     #[test]

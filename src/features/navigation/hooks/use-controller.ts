@@ -5,7 +5,6 @@ import {
 	type AddRepositoryResponse,
 	addRepositoryFromLocalPath,
 	cloneRepositoryFromUrl,
-	type DerivedStatus,
 	finalizeWorkspaceFromRepo,
 	listenArchiveExecutionFailed,
 	listenArchiveExecutionSucceeded,
@@ -17,7 +16,7 @@ import {
 	prepareWorkspaceFromRepo,
 	type RepositoryCreateOption,
 	restoreWorkspace,
-	setWorkspaceManualStatus,
+	setWorkspaceStatus,
 	startArchiveWorkspace,
 	unpinWorkspace,
 	validateRestoreWorkspace,
@@ -25,6 +24,7 @@ import {
 	type WorkspaceRow,
 	type WorkspaceSessionSummary,
 	type WorkspaceState,
+	type WorkspaceStatus,
 } from "@/lib/api";
 import { extractError, isRecoverableByPurge } from "@/lib/errors";
 import {
@@ -38,11 +38,18 @@ import {
 } from "@/lib/query-client";
 import { useSettings } from "@/lib/settings";
 import {
+	beginSidebarMutation as gateBeginSidebarMutation,
+	endSidebarMutation as gateEndSidebarMutation,
+	flushSidebarLists as gateFlushSidebarLists,
+	isSidebarMutationInFlight,
+} from "@/lib/sidebar-mutation-gate";
+import {
 	createOptimisticCreatingWorkspaceDetail,
 	describeUnknownError,
 	findInitialWorkspaceId,
 	findReplacementWorkspaceIdAfterRemoval,
 	hasWorkspaceId,
+	insertRowByCreatedAtDesc,
 	rowToWorkspaceSummary,
 	summaryToArchivedRow,
 	workspaceGroupIdFromStatus,
@@ -108,7 +115,6 @@ export function useWorkspacesSidebarController({
 			}
 		>
 	>(() => new Map());
-	const sidebarMutationCountRef = useRef(0);
 	// Live mirror of `selectedWorkspaceId` so async callbacks (Phase 2
 	// finalize catch, archive/restore handlers, etc.) can read the
 	// current selection rather than a stale closure snapshot.
@@ -116,24 +122,16 @@ export function useWorkspacesSidebarController({
 	selectedWorkspaceIdRef.current = selectedWorkspaceId;
 
 	const flushSidebarLists = useCallback(() => {
-		void queryClient.invalidateQueries({
-			queryKey: helmorQueryKeys.workspaceGroups,
-		});
-		void queryClient.invalidateQueries({
-			queryKey: helmorQueryKeys.archivedWorkspaces,
-		});
+		gateFlushSidebarLists(queryClient);
 	}, [queryClient]);
 
 	const beginSidebarMutation = useCallback(() => {
-		sidebarMutationCountRef.current += 1;
+		gateBeginSidebarMutation();
 	}, []);
 
 	const endSidebarMutation = useCallback(() => {
-		sidebarMutationCountRef.current = Math.max(
-			0,
-			sidebarMutationCountRef.current - 1,
-		);
-		if (sidebarMutationCountRef.current === 0) {
+		gateEndSidebarMutation();
+		if (!isSidebarMutationInFlight()) {
 			flushSidebarLists();
 		}
 	}, [flushSidebarLists]);
@@ -387,6 +385,13 @@ export function useWorkspacesSidebarController({
 			return;
 		}
 
+		// Only restore archived workspaces if they were the live selection
+		// (runtime state). Never auto-restore archived from persisted
+		// `lastWorkspaceId` — the directory may be gone, which would spam
+		// git/editor errors on every poll. Fall through to an active group.
+		const isInActiveGroups = (id: string) =>
+			groups.some((group) => group.rows.some((row) => row.id === id));
+
 		let nextWorkspaceId: string | null;
 		if (
 			selectedWorkspaceId &&
@@ -395,7 +400,7 @@ export function useWorkspacesSidebarController({
 			nextWorkspaceId = selectedWorkspaceId;
 		} else if (
 			settings.lastWorkspaceId &&
-			hasWorkspaceId(settings.lastWorkspaceId, groups, archivedSummaries)
+			isInActiveGroups(settings.lastWorkspaceId)
 		) {
 			nextWorkspaceId = settings.lastWorkspaceId;
 		} else {
@@ -476,7 +481,7 @@ export function useWorkspacesSidebarController({
 					queryKey: helmorQueryKeys.workspaceSessions(workspaceId),
 				}),
 			]);
-			if (!opts?.skipSidebarFlush && sidebarMutationCountRef.current === 0) {
+			if (!opts?.skipSidebarFlush && !isSidebarMutationInFlight()) {
 				flushSidebarLists();
 			}
 		},
@@ -600,12 +605,10 @@ export function useWorkspacesSidebarController({
 					pinnedAt: currentlyPinned ? null : new Date().toISOString(),
 				};
 
-				const targetGroupId = currentlyPinned
-					? workspaceGroupIdFromStatus(
-							updatedRow.manualStatus,
-							updatedRow.derivedStatus,
-						)
-					: "pinned";
+				const targetGroupId = workspaceGroupIdFromStatus(
+					updatedRow.status,
+					updatedRow.pinnedAt,
+				);
 
 				return withoutRow.map((group) =>
 					group.id === targetGroupId
@@ -633,10 +636,10 @@ export function useWorkspacesSidebarController({
 		[invalidateWorkspaceSummary, pushWorkspaceToast, queryClient],
 	);
 
-	const handleSetManualStatus = useCallback(
-		async (workspaceId: string, status: DerivedStatus | null) => {
+	const handleSetWorkspaceStatus = useCallback(
+		async (workspaceId: string, status: WorkspaceStatus) => {
 			try {
-				await setWorkspaceManualStatus(workspaceId, status);
+				await setWorkspaceStatus(workspaceId, status);
 				flushSidebarLists();
 			} catch (error) {
 				pushWorkspaceToast(
@@ -760,7 +763,7 @@ export function useWorkspacesSidebarController({
 			// placeholders until the short-circuited backend responds a few
 			// ms later. Values mirror the Rust short-circuits in
 			// `get_workspace_git_action_status` and
-			// `lookup_workspace_pr_action_status` — keep them in sync.
+			// `get_workspace_forge_action_status` — keep them in sync.
 			queryClient.setQueryData(
 				helmorQueryKeys.workspaceGitActionStatus(prepareResponse.workspaceId),
 				{
@@ -775,13 +778,13 @@ export function useWorkspacesSidebarController({
 				},
 			);
 			queryClient.setQueryData(
-				helmorQueryKeys.workspacePr(prepareResponse.workspaceId),
+				helmorQueryKeys.workspaceChangeRequest(prepareResponse.workspaceId),
 				null,
 			);
 			queryClient.setQueryData(
-				helmorQueryKeys.workspacePrActionStatus(prepareResponse.workspaceId),
+				helmorQueryKeys.workspaceForgeActionStatus(prepareResponse.workspaceId),
 				{
-					pr: null,
+					changeRequest: null,
 					reviewDecision: null,
 					mergeable: null,
 					deployments: [],
@@ -896,11 +899,19 @@ export function useWorkspacesSidebarController({
 						exact: true,
 					});
 					queryClient.removeQueries({
-						queryKey: helmorQueryKeys.workspacePr(prepareResponse.workspaceId),
+						queryKey: helmorQueryKeys.workspaceChangeRequest(
+							prepareResponse.workspaceId,
+						),
 						exact: true,
 					});
 					queryClient.removeQueries({
-						queryKey: helmorQueryKeys.workspacePrActionStatus(
+						queryKey: helmorQueryKeys.workspaceForge(
+							prepareResponse.workspaceId,
+						),
+						exact: true,
+					});
+					queryClient.removeQueries({
+						queryKey: helmorQueryKeys.workspaceForgeActionStatus(
 							prepareResponse.workspaceId,
 						),
 						exact: true,
@@ -1125,6 +1136,20 @@ export function useWorkspacesSidebarController({
 		[handleDeleteWorkspace, pushWorkspaceToast],
 	);
 
+	const notifyTargetBranchRestore = useCallback(
+		(targetBranch: string | null) => {
+			if (!targetBranch) {
+				return;
+			}
+			pushWorkspaceToast(
+				`No archive commit was available, so the workspace was restored from "${targetBranch}".`,
+				"Restored from target branch",
+				"default",
+			);
+		},
+		[pushWorkspaceToast],
+	);
+
 	// Keep the forward-ref used by `pushWorkspaceErrorToast` in sync.
 	useEffect(() => {
 		handleDeleteWorkspaceRef.current = handleDeleteWorkspace;
@@ -1310,6 +1335,7 @@ export function useWorkspacesSidebarController({
 					.then((response) => {
 						prefetchWorkspace(workspaceId);
 						onSelectWorkspace(workspaceId);
+						notifyTargetBranchRestore(response.restoredFromTargetBranch);
 						if (response.branchRename) {
 							notifyBranchRename(response.branchRename);
 						}
@@ -1339,14 +1365,20 @@ export function useWorkspacesSidebarController({
 				state: "ready",
 			});
 			const targetGroupId = workspaceGroupIdFromStatus(
-				archivedSummary.manualStatus,
-				archivedSummary.derivedStatus,
+				archivedSummary.status,
+				archivedSummary.pinnedAt,
 			);
+			// Sorted insert by createdAt DESC so the row lands where the server
+			// will place it on refetch — avoids the reorder flicker we'd get from
+			// unconditionally prepending.
 			queryClient.setQueryData(helmorQueryKeys.workspaceGroups, (current) =>
 				Array.isArray(current)
 					? (current as typeof groups).map((group) =>
 							group.id === targetGroupId
-								? { ...group, rows: [placeholderRow, ...group.rows] }
+								? {
+										...group,
+										rows: insertRowByCreatedAtDesc(group.rows, placeholderRow),
+									}
 								: group,
 						)
 					: current,
@@ -1369,6 +1401,7 @@ export function useWorkspacesSidebarController({
 					if (response.branchRename) {
 						notifyBranchRename(response.branchRename);
 					}
+					notifyTargetBranchRestore(response.restoredFromTargetBranch);
 				})
 				.catch((error) => {
 					queryClient.setQueryData(
@@ -1392,6 +1425,7 @@ export function useWorkspacesSidebarController({
 			beginSidebarMutation,
 			endSidebarMutation,
 			notifyBranchRename,
+			notifyTargetBranchRestore,
 			onSelectWorkspace,
 			pendingCreations,
 			prefetchWorkspace,
@@ -1455,7 +1489,7 @@ export function useWorkspacesSidebarController({
 		handleOpenCloneDialog,
 		handleRestoreWorkspace,
 		handleSelectWorkspace,
-		handleSetManualStatus,
+		handleSetWorkspaceStatus,
 		handleTogglePin,
 		isCloneDialogOpen,
 		prefetchWorkspace,
@@ -1486,8 +1520,7 @@ function createPreparedWorkspaceRow(
 		hasUnread: false,
 		workspaceUnread: 0,
 		unreadSessionCount: 0,
-		derivedStatus: "in-progress",
-		manualStatus: null,
+		status: "in-progress",
 		branch: prepared.branch,
 		activeSessionId: prepared.initialSessionId,
 		activeSessionTitle: "Untitled",
@@ -1497,6 +1530,7 @@ function createPreparedWorkspaceRow(
 		pinnedAt: null,
 		sessionCount: 1,
 		messageCount: 0,
+		createdAt: new Date().toISOString(),
 	};
 }
 

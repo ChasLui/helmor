@@ -288,6 +288,12 @@ fn dispatch_item(acc: &mut StreamAccumulator, raw_line: &str, value: &Value, per
         Some("plan") => {
             handle_plan_item(acc, raw_line, item, item_id.as_deref(), persist);
         }
+        Some("context_compaction") => {
+            handle_context_compaction_item(acc, raw_line, item, item_id.as_deref(), persist);
+        }
+        Some("image_generation") => {
+            handle_image_generation(acc, raw_line, item, item_id.as_deref(), persist);
+        }
         Some("error") => {
             handle_error_item(acc, raw_line, item, persist);
         }
@@ -801,6 +807,101 @@ fn handle_plan_item(
     }
 }
 
+fn handle_context_compaction_item(
+    acc: &mut StreamAccumulator,
+    raw_line: &str,
+    item: &Value,
+    item_id: Option<&str>,
+    persist: bool,
+) {
+    let body = item
+        .get("summary")
+        .or_else(|| item.get("text"))
+        .or_else(|| item.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let subtype = if persist {
+        "codex_compacted"
+    } else {
+        "codex_compacting"
+    };
+    let synthetic = serde_json::json!({
+        "type": "system",
+        "subtype": subtype,
+        "summary": body,
+    });
+    let synthetic_str = serde_json::to_string(&synthetic).unwrap_or_default();
+    let prefix = if persist {
+        "codex-compaction"
+    } else {
+        "codex-compacting"
+    };
+    let compaction_id = item_id
+        .map(|id| format!("{prefix}:{id}"))
+        .unwrap_or_else(|| format!("{prefix}:{}", acc.line_count));
+    acc.collect_or_replace(
+        &synthetic_str,
+        &synthetic,
+        MessageRole::System,
+        Some(compaction_id.clone()),
+    );
+
+    if persist {
+        acc.turns.push(CollectedTurn {
+            id: compaction_id,
+            role: MessageRole::System,
+            content_json: raw_line.to_string(),
+        });
+    }
+}
+
+fn handle_image_generation(
+    acc: &mut StreamAccumulator,
+    raw_line: &str,
+    item: &Value,
+    item_id: Option<&str>,
+    persist: bool,
+) {
+    let envelope = serde_json::json!({
+        "type": "item.completed",
+        "item": item,
+    });
+    let s = serde_json::to_string(&envelope).unwrap_or_default();
+    let image_id = item_id
+        .map(|id| format!("codex-image:{id}"))
+        .unwrap_or_else(|| format!("codex-image:{}", acc.line_count));
+    acc.collect_or_replace(
+        &s,
+        &envelope,
+        MessageRole::Assistant,
+        Some(image_id.clone()),
+    );
+
+    if persist {
+        acc.turns.push(CollectedTurn {
+            id: image_id,
+            role: MessageRole::Assistant,
+            content_json: raw_line.to_string(),
+        });
+    }
+}
+
+pub(super) fn handle_thread_compacted(acc: &mut StreamAccumulator, _raw_line: &str, value: &Value) {
+    let synthetic = serde_json::json!({
+        "type": "system",
+        "subtype": "codex_compacted",
+        "thread_id": value.get("threadId").or_else(|| value.get("thread_id")),
+    });
+    let synthetic_str = synthetic.to_string();
+    let id = format!("codex-thread-compacted:{}", acc.line_count);
+    acc.collect_message(&synthetic_str, &synthetic, MessageRole::System, Some(&id));
+    acc.turns.push(CollectedTurn {
+        id,
+        role: MessageRole::System,
+        content_json: synthetic_str,
+    });
+}
+
 /// Handle `turn/plan/updated`: map plan steps to a TodoList via synthetic
 /// `TodoWrite` tool_use. Uses a stable override_id so each update replaces
 /// the previous.
@@ -958,6 +1059,8 @@ fn normalize_item_type(t: &str) -> &str {
         "todoList" | "todo_list" => "todo_list",
         "reasoning" => "reasoning",
         "plan" => "plan",
+        "contextCompaction" | "context_compaction" => "context_compaction",
+        "imageGeneration" | "image_generation" => "image_generation",
         "error" => "error",
         other => other,
     }
@@ -972,6 +1075,7 @@ fn normalize_field_name(name: &str) -> String {
         "processId" => "process_id".to_string(),
         "commandActions" => "command_actions".to_string(),
         "memoryCitation" => "memory_citation".to_string(),
+        "savedPath" => "saved_path".to_string(),
         _ => name.to_string(),
     }
 }

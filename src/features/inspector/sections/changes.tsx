@@ -1,4 +1,4 @@
-import { useIsFetching, useQueryClient } from "@tanstack/react-query";
+import { useIsFetching, useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
 	getMaterialFileIcon,
@@ -26,14 +26,23 @@ import type {
 	WorkspaceCommitButtonMode,
 } from "@/features/commit/button";
 import {
+	type ChangeRequestInfo,
+	continueWorkspaceFromTargetBranch,
 	discardWorkspaceFile,
-	type PullRequestInfo,
+	type ForgeDetection,
 	stageWorkspaceFile,
 	unstageWorkspaceFile,
 } from "@/lib/api";
 import type { DiffOpenOptions, InspectorFileItem } from "@/lib/editor-session";
-import { helmorQueryKeys } from "@/lib/query-client";
+import { extractError, isRecoverableByPurge } from "@/lib/errors";
+import {
+	helmorQueryKeys,
+	workspaceForgeActionStatusQueryOptions,
+	workspaceForgeQueryOptions,
+} from "@/lib/query-client";
 import { cn } from "@/lib/utils";
+import { showWorkspaceBrokenToast } from "@/lib/workspace-broken-toast";
+import { useWorkspaceToast } from "@/lib/workspace-toast-context";
 import { GitSectionHeader } from "./git-section-header";
 
 const STATUS_COLORS: Record<InspectorFileItem["status"], string> = {
@@ -55,7 +64,7 @@ type ChangesSectionProps = {
 	onCommitAction?: (mode: WorkspaceCommitButtonMode) => Promise<void>;
 	commitButtonMode?: WorkspaceCommitButtonMode;
 	commitButtonState?: CommitButtonState;
-	prInfo: PullRequestInfo | null;
+	changeRequest: ChangeRequestInfo | null;
 };
 
 export function ChangesSection({
@@ -71,7 +80,7 @@ export function ChangesSection({
 	onCommitAction,
 	commitButtonMode = "create-pr",
 	commitButtonState,
-	prInfo,
+	changeRequest,
 }: ChangesSectionProps) {
 	const queryClient = useQueryClient();
 	const [changesTreeView, setChangesTreeView] = useState(true);
@@ -79,6 +88,22 @@ export function ChangesSection({
 	const [changesOpen, setChangesOpen] = useState(true);
 	const [stagedOpen, setStagedOpen] = useState(true);
 	const [branchDiffOpen, setBranchDiffOpen] = useState(true);
+	const [isContinuingWorkspace, setIsContinuingWorkspace] = useState(false);
+	const forgeQuery = useQuery({
+		...workspaceForgeQueryOptions(workspaceId ?? "__none__"),
+		enabled: workspaceId !== null,
+	});
+	const forgeStatusQuery = useQuery({
+		...workspaceForgeActionStatusQueryOptions(workspaceId ?? "__none__"),
+		enabled: workspaceId !== null,
+	});
+	const cachedForgeDetection = workspaceId
+		? queryClient.getQueryData<ForgeDetection>(
+				helmorQueryKeys.workspaceForge(workspaceId),
+			)
+		: null;
+	const forgeDetection = forgeQuery.data ?? cachedForgeDetection ?? null;
+	const changeRequestName = forgeDetection?.labels.changeRequestName ?? "PR";
 
 	// Only show loading when the user switches target branch within the
 	// same workspace — not on workspace/repo navigation or routine polling.
@@ -155,6 +180,28 @@ export function ChangesSection({
 		}
 	}, [queryClient, workspaceId, workspaceRootPath]);
 
+	const pushToast = useWorkspaceToast();
+	// Surface backend mutation failures (which used to be silently
+	// swallowed). If the workspace is broken, show a persistent toast
+	// with "Permanently Delete" — never auto-deletes. Dismiss preserves
+	// the chat history (the startup reconcile has archived the row so
+	// the user can still find it).
+	const surfaceChangeError = useCallback(
+		(action: string, error: unknown) => {
+			const { code, message } = extractError(error, `Failed to ${action}.`);
+			if (isRecoverableByPurge(code) && workspaceId) {
+				showWorkspaceBrokenToast({
+					workspaceId,
+					pushToast,
+					queryClient,
+				});
+				return;
+			}
+			pushToast(message, `Unable to ${action}`, "destructive");
+		},
+		[pushToast, queryClient, workspaceId],
+	);
+
 	const stageFile = useCallback(
 		async (relativePath: string) => {
 			if (!workspaceRootPath) {
@@ -162,11 +209,13 @@ export function ChangesSection({
 			}
 			try {
 				await stageWorkspaceFile(workspaceRootPath, relativePath);
+			} catch (error) {
+				surfaceChangeError("stage file", error);
 			} finally {
 				invalidateChanges();
 			}
 		},
-		[invalidateChanges, workspaceRootPath],
+		[invalidateChanges, surfaceChangeError, workspaceRootPath],
 	);
 	const unstageFile = useCallback(
 		async (relativePath: string) => {
@@ -175,11 +224,13 @@ export function ChangesSection({
 			}
 			try {
 				await unstageWorkspaceFile(workspaceRootPath, relativePath);
+			} catch (error) {
+				surfaceChangeError("unstage file", error);
 			} finally {
 				invalidateChanges();
 			}
 		},
-		[invalidateChanges, workspaceRootPath],
+		[invalidateChanges, surfaceChangeError, workspaceRootPath],
 	);
 	const stageAll = useCallback(async () => {
 		if (!workspaceRootPath) {
@@ -190,10 +241,17 @@ export function ChangesSection({
 			for (const path of paths) {
 				await stageWorkspaceFile(workspaceRootPath, path);
 			}
+		} catch (error) {
+			surfaceChangeError("stage files", error);
 		} finally {
 			invalidateChanges();
 		}
-	}, [invalidateChanges, unstagedChanges, workspaceRootPath]);
+	}, [
+		invalidateChanges,
+		surfaceChangeError,
+		unstagedChanges,
+		workspaceRootPath,
+	]);
 	const unstageAll = useCallback(async () => {
 		if (!workspaceRootPath) {
 			return;
@@ -203,10 +261,12 @@ export function ChangesSection({
 			for (const path of paths) {
 				await unstageWorkspaceFile(workspaceRootPath, path);
 			}
+		} catch (error) {
+			surfaceChangeError("unstage files", error);
 		} finally {
 			invalidateChanges();
 		}
-	}, [invalidateChanges, stagedChanges, workspaceRootPath]);
+	}, [invalidateChanges, stagedChanges, surfaceChangeError, workspaceRootPath]);
 
 	const discardFile = useCallback(
 		async (relativePath: string) => {
@@ -215,11 +275,13 @@ export function ChangesSection({
 			}
 			try {
 				await discardWorkspaceFile(workspaceRootPath, relativePath);
+			} catch (error) {
+				surfaceChangeError("discard changes", error);
 			} finally {
 				invalidateChanges();
 			}
 		},
-		[invalidateChanges, workspaceRootPath],
+		[invalidateChanges, surfaceChangeError, workspaceRootPath],
 	);
 
 	const handleCommitButtonClick = useCallback(async () => {
@@ -229,21 +291,60 @@ export function ChangesSection({
 		await onCommitAction(commitButtonMode);
 	}, [commitButtonMode, onCommitAction]);
 
-	// Drive the header's shimmer bar off the shared PR query cache. Both
+	const handleContinueWorkspace = useCallback(async () => {
+		if (!workspaceId || isContinuingWorkspace) return;
+		setIsContinuingWorkspace(true);
+		try {
+			const result = await continueWorkspaceFromTargetBranch(workspaceId);
+			pushToast(`Workspace moved to ${result.branch}.`, "Continued", "default");
+			await Promise.all([
+				queryClient.invalidateQueries({
+					queryKey: helmorQueryKeys.workspaceGroups,
+				}),
+				queryClient.invalidateQueries({
+					queryKey: helmorQueryKeys.workspaceDetail(workspaceId),
+				}),
+				queryClient.invalidateQueries({
+					queryKey: helmorQueryKeys.workspaceGitActionStatus(workspaceId),
+				}),
+				queryClient.invalidateQueries({
+					queryKey: helmorQueryKeys.workspaceChangeRequest(workspaceId),
+				}),
+				queryClient.invalidateQueries({
+					queryKey: helmorQueryKeys.workspaceForgeActionStatus(workspaceId),
+				}),
+			]);
+			invalidateChanges();
+		} catch (error) {
+			surfaceChangeError("continue workspace", error);
+		} finally {
+			setIsContinuingWorkspace(false);
+		}
+	}, [
+		invalidateChanges,
+		isContinuingWorkspace,
+		pushToast,
+		queryClient,
+		surfaceChangeError,
+		workspaceId,
+	]);
+
+	// Drive the header's shimmer bar off the shared forge query cache. Both
 	// queries dedupe by key, so this reads the same fetching state the
 	// App-level useQuery instances own.
-	const prFetchingCount = useIsFetching({
-		queryKey: helmorQueryKeys.workspacePr(workspaceId ?? "__none__"),
+	const changeRequestFetchingCount = useIsFetching({
+		queryKey: helmorQueryKeys.workspaceChangeRequest(workspaceId ?? "__none__"),
 		exact: true,
 	});
-	const prActionStatusFetchingCount = useIsFetching({
-		queryKey: helmorQueryKeys.workspacePrActionStatus(
+	const forgeActionStatusFetchingCount = useIsFetching({
+		queryKey: helmorQueryKeys.workspaceForgeActionStatus(
 			workspaceId ?? "__none__",
 		),
 		exact: true,
 	});
-	const isPrRefreshing =
-		workspaceId !== null && prFetchingCount + prActionStatusFetchingCount > 0;
+	const isForgeRefreshing =
+		workspaceId !== null &&
+		changeRequestFetchingCount + forgeActionStatusFetchingCount > 0;
 
 	return (
 		<section
@@ -254,11 +355,19 @@ export function ChangesSection({
 			<GitSectionHeader
 				commitButtonMode={commitButtonMode}
 				commitButtonState={commitButtonState}
-				prInfo={prInfo}
+				changeRequest={changeRequest}
+				changeRequestName={changeRequestName}
+				forgeRemoteState={forgeStatusQuery.data?.remoteState ?? null}
+				forgeDetection={forgeDetection}
+				workspaceId={workspaceId}
 				hasChanges={hasChanges}
-				isRefreshing={isPrRefreshing}
-				onPrClick={prInfo ? () => void openUrl(prInfo.url) : undefined}
+				isRefreshing={isForgeRefreshing}
+				isContinuingWorkspace={isContinuingWorkspace}
+				onChangeRequestClick={
+					changeRequest ? () => void openUrl(changeRequest.url) : undefined
+				}
 				onCommit={handleCommitButtonClick}
+				onContinueWorkspace={handleContinueWorkspace}
 			/>
 
 			<ScrollArea

@@ -3,7 +3,7 @@ import { memo, useCallback, useEffect, useMemo, useRef } from "react";
 import type {
 	AgentModelSection,
 	AgentProvider,
-	PullRequestInfo,
+	ChangeRequestInfo,
 	RepoScripts,
 	ThreadMessageLike,
 	WorkspaceDetail,
@@ -23,6 +23,7 @@ import {
 	type WorkspaceScriptType,
 } from "@/lib/workspace-script-actions";
 import { WorkspacePanel } from "./index";
+import type { SessionCloseRequest } from "./use-confirm-session-close";
 
 const EMPTY_MESSAGES: ThreadMessageLike[] = [];
 
@@ -36,7 +37,7 @@ type WorkspacePanelContainerProps = {
 	sendingSessionIds?: Set<string>;
 	interactionRequiredSessionIds?: Set<string>;
 	modelSelections?: Record<string, string>;
-	workspacePrInfo?: PullRequestInfo | null;
+	workspaceChangeRequest?: ChangeRequestInfo | null;
 	onSelectSession: (sessionId: string | null) => void;
 	onResolveDisplayedSession: (sessionId: string | null) => void;
 	onQueuePendingPromptForSession?: (request: {
@@ -45,6 +46,7 @@ type WorkspacePanelContainerProps = {
 		modelId?: string | null;
 		permissionMode?: string | null;
 	}) => void;
+	onRequestCloseSession?: (request: SessionCloseRequest) => void;
 	headerActions?: React.ReactNode;
 	headerLeading?: React.ReactNode;
 };
@@ -59,10 +61,11 @@ export const WorkspacePanelContainer = memo(function WorkspacePanelContainer({
 	sendingSessionIds,
 	interactionRequiredSessionIds,
 	modelSelections = {},
-	workspacePrInfo = null,
+	workspaceChangeRequest = null,
 	onSelectSession,
 	onResolveDisplayedSession,
 	onQueuePendingPromptForSession,
+	onRequestCloseSession,
 	headerActions,
 	headerLeading,
 }: WorkspacePanelContainerProps) {
@@ -529,11 +532,12 @@ export const WorkspacePanelContainer = memo(function WorkspacePanelContainer({
 			onSessionsChanged={handleSessionsChanged}
 			onSessionRenamed={handleSessionRenamed}
 			onWorkspaceChanged={handleWorkspaceChanged}
+			onRequestCloseSession={onRequestCloseSession}
 			headerActions={headerActions}
 			headerLeading={headerLeading}
 			missingScriptTypes={missingScriptTypes}
 			onInitializeScript={handleInitializeScript}
-			prInfo={workspacePrInfo}
+			changeRequest={workspaceChangeRequest}
 		/>
 	);
 });

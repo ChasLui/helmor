@@ -34,15 +34,14 @@ import {
 } from "@/components/ui/tooltip";
 import {
 	type AgentProvider,
+	type ChangeRequestInfo,
 	createSession,
 	deleteSession,
 	listRemoteBranches,
 	loadHiddenSessions,
-	type PullRequestInfo,
 	prefetchRemoteRefs,
 	renameSession,
 	renameWorkspaceBranch,
-	stopAgentStream,
 	unhideSession,
 	updateIntendedTargetBranch,
 	type WorkspaceDetail,
@@ -55,13 +54,13 @@ import {
 	type WorkspaceBranchTone,
 } from "@/lib/workspace-helpers";
 import { useWorkspaceToast } from "@/lib/workspace-toast-context";
-import { RunningSessionCloseDialog } from "./running-session-close-dialog";
 import { seedNewSessionInCache } from "./session-cache";
 import { closeWorkspaceSession } from "./session-close";
+import type { SessionCloseRequest } from "./use-confirm-session-close";
 
 type WorkspacePanelHeaderProps = {
 	workspace: WorkspaceDetail | null;
-	prInfo?: PullRequestInfo | null;
+	changeRequest?: ChangeRequestInfo | null;
 	sessions: WorkspaceSessionSummary[];
 	selectedSessionId: string | null;
 	sessionDisplayProviders?: Record<string, AgentProvider>;
@@ -76,11 +75,12 @@ type WorkspacePanelHeaderProps = {
 	onSessionsChanged?: () => void;
 	onSessionRenamed?: (sessionId: string, title: string) => void;
 	onWorkspaceChanged?: () => void;
+	onRequestCloseSession?: (request: SessionCloseRequest) => void;
 };
 
 export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 	workspace,
-	prInfo = null,
+	changeRequest = null,
 	sessions,
 	selectedSessionId,
 	sessionDisplayProviders,
@@ -95,12 +95,12 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 	onSessionsChanged,
 	onSessionRenamed,
 	onWorkspaceChanged,
+	onRequestCloseSession,
 }: WorkspacePanelHeaderProps) {
 	const branchTone = getWorkspaceBranchTone({
 		workspaceState: workspace?.state,
-		manualStatus: workspace?.manualStatus,
-		derivedStatus: workspace?.derivedStatus,
-		prInfo,
+		status: workspace?.status,
+		changeRequest,
 	});
 	const [showHistory, setShowHistory] = useState(false);
 	const [hiddenSessions, setHiddenSessions] = useState<
@@ -123,18 +123,6 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 	const [branchCopied, setBranchCopied] = useState(false);
 	const tabsScrollRef = useRef<HTMLDivElement>(null);
 	const [hasRightOverflow, setHasRightOverflow] = useState(false);
-	const [confirmCloseSessionId, setConfirmCloseSessionId] = useState<
-		string | null
-	>(null);
-	const [confirmCloseLoading, setConfirmCloseLoading] = useState(false);
-
-	const confirmCloseSession =
-		sessions.find((session) => session.id === confirmCloseSessionId) ?? null;
-	const confirmCloseProvider =
-		(confirmCloseSession
-			? (sessionDisplayProviders?.[confirmCloseSession.id] ??
-				confirmCloseSession.agentType)
-			: null) ?? null;
 
 	const updateOverflow = useCallback(() => {
 		const el = tabsScrollRef.current;
@@ -226,9 +214,25 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 			if (!workspace) {
 				return;
 			}
+			const targetSession =
+				sessions.find((session) => session.id === sessionId) ?? null;
+			if (!targetSession) {
+				return;
+			}
 
-			if (sendingSessionIds?.has(sessionId)) {
-				setConfirmCloseSessionId(sessionId);
+			// When the caller provided a shared confirm-close hook
+			// (`onRequestCloseSession`), delegate — it handles the running-
+			// session confirmation dialog itself. Otherwise fall back to an
+			// unconditional close.
+			if (onRequestCloseSession) {
+				onRequestCloseSession({
+					workspace,
+					sessions,
+					session: targetSession,
+					activateAdjacent: targetSession.id === selectedSessionId,
+					provider: sessionDisplayProviders?.[targetSession.id] ?? null,
+					onSessionsChanged,
+				});
 				return;
 			}
 
@@ -237,66 +241,24 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 				workspace,
 				sessions,
 				sessionId,
+				activateAdjacent: sessionId === selectedSessionId,
 				onSelectSession,
 				onSessionsChanged,
 				pushToast,
 			});
 		},
 		[
+			onRequestCloseSession,
 			onSelectSession,
 			onSessionsChanged,
 			pushToast,
 			queryClient,
-			sendingSessionIds,
+			selectedSessionId,
+			sessionDisplayProviders,
 			sessions,
 			workspace,
 		],
 	);
-
-	const handleConfirmCloseSession = useCallback(async () => {
-		if (!workspace || !confirmCloseSession) {
-			return;
-		}
-
-		const provider =
-			sessionDisplayProviders?.[confirmCloseSession.id] ??
-			confirmCloseSession.agentType ??
-			undefined;
-
-		setConfirmCloseLoading(true);
-		try {
-			await stopAgentStream(confirmCloseSession.id, provider);
-		} catch (error) {
-			pushToast(
-				error instanceof Error ? error.message : String(error),
-				"Unable to stop chat",
-				"destructive",
-			);
-			setConfirmCloseLoading(false);
-			return;
-		}
-
-		setConfirmCloseSessionId(null);
-		setConfirmCloseLoading(false);
-		await closeWorkspaceSession({
-			queryClient,
-			workspace,
-			sessions,
-			sessionId: confirmCloseSession.id,
-			onSelectSession,
-			onSessionsChanged,
-			pushToast,
-		});
-	}, [
-		confirmCloseSession,
-		onSelectSession,
-		onSessionsChanged,
-		pushToast,
-		queryClient,
-		sessionDisplayProviders,
-		sessions,
-		workspace,
-	]);
 
 	const handleToggleHistory = useCallback(
 		async (open: boolean) => {
@@ -367,6 +329,11 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 		setEditingTitle("");
 	}, []);
 
+	const stopTabActionPointerDown = useCallback((event: React.PointerEvent) => {
+		event.preventDefault();
+		event.stopPropagation();
+	}, []);
+
 	return (
 		<header className="relative z-20">
 			<div
@@ -374,7 +341,7 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 				className="flex h-9 items-center justify-between gap-3 px-[18px]"
 				data-tauri-drag-region
 			>
-				<div className="flex min-w-0 items-center gap-2 text-[12.5px]">
+				<div className="relative z-0 flex min-w-0 flex-1 items-center gap-2 overflow-hidden text-[12.5px]">
 					{headerLeading}
 					<span className="group/branch relative inline-flex items-center gap-1 overflow-hidden px-1 py-0.5 font-medium text-foreground">
 						<GitBranch
@@ -554,7 +521,7 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 					) : null}
 				</div>
 				{headerActions ? (
-					<div className="flex shrink-0 items-center gap-1">
+					<div className="relative z-10 flex shrink-0 items-center gap-1 bg-background pl-1">
 						{headerActions}
 					</div>
 				) : null}
@@ -676,6 +643,7 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 																<span
 																	role="button"
 																	aria-label="Rename session"
+																	onPointerDown={stopTabActionPointerDown}
 																	onClick={(event) =>
 																		handleStartRename(session, event)
 																	}
@@ -686,6 +654,7 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 																<span
 																	role="button"
 																	aria-label="Close session"
+																	onPointerDown={stopTabActionPointerDown}
 																	onClick={(event) =>
 																		handleHideSession(session.id, event)
 																	}
@@ -799,18 +768,6 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 					</DropdownMenuContent>
 				</DropdownMenu>
 			</div>
-			<RunningSessionCloseDialog
-				open={confirmCloseSession !== null}
-				agentLabel={confirmCloseProvider === "codex" ? "Codex" : "Claude"}
-				loading={confirmCloseLoading}
-				onOpenChange={(open) => {
-					if (confirmCloseLoading || open) {
-						return;
-					}
-					setConfirmCloseSessionId(null);
-				}}
-				onConfirm={() => void handleConfirmCloseSession()}
-			/>
 		</header>
 	);
 });
@@ -881,7 +838,7 @@ function BranchPicker({
 				type="button"
 				variant="ghost"
 				size="xs"
-				className="h-6 max-w-[180px] gap-1 rounded-md px-1.5 text-[13px] font-medium text-muted-foreground hover:text-foreground"
+				className="h-6 min-w-0 max-w-[180px] gap-1 rounded-md px-1.5 text-[13px] font-medium text-muted-foreground hover:text-foreground"
 			>
 				<span className="truncate">
 					{displayRemote}/{currentBranch}

@@ -491,11 +491,13 @@ fn persist_turn(
 ) -> Result<()> {
     let now = crate::models::db::current_timestamp()?;
     let msg_id = turn.id.clone();
+    let content =
+        crate::image_store::prepare_turn_content_for_persist(session_id, &turn.content_json)?;
     conn.execute(
         r#"INSERT INTO session_messages
            (id, session_id, role, content, created_at, sent_at)
            VALUES (?1, ?2, ?3, ?4, ?5, ?5)"#,
-        params![msg_id, session_id, turn.role, turn.content_json, now],
+        params![msg_id, session_id, turn.role, content, now],
     )?;
     Ok(())
 }
@@ -726,7 +728,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO workspaces (id, repository_id, directory_name, state, derived_status) VALUES ('w1', 'r1', 'test-dir', 'ready', 'in-progress')",
+            "INSERT INTO workspaces (id, repository_id, directory_name, state, status) VALUES ('w1', 'r1', 'test-dir', 'ready', 'in-progress')",
             [],
         )
         .unwrap();
@@ -756,7 +758,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO workspaces (id, repository_id, directory_name, state, derived_status) VALUES ('w1', 'r1', 'test-dir', 'ready', 'in-progress')",
+            "INSERT INTO workspaces (id, repository_id, directory_name, state, status) VALUES ('w1', 'r1', 'test-dir', 'ready', 'in-progress')",
             [],
         )
         .unwrap();

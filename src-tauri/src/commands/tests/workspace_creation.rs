@@ -26,9 +26,6 @@ fn create_workspace_from_repo_creates_ready_workspace_and_initial_session() {
 
     let workspace_dir = harness.workspace_dir(&response.directory_name);
     assert!(workspace_dir.join(".git").exists());
-    assert!(workspace_dir.join(".context/notes.md").exists());
-    assert!(workspace_dir.join(".context/todos.md").exists());
-    assert!(workspace_dir.join(".context/attachments").is_dir());
 
     let connection = Connection::open(harness.db_path()).unwrap();
     let (state, branch, initialization_parent_branch, intended_target_branch, active_session_id): (
@@ -87,17 +84,18 @@ fn create_workspace_from_repo_creates_ready_workspace_and_initial_session() {
 }
 
 #[test]
-fn create_workspace_from_repo_defers_setup_when_script_configured() {
+fn create_workspace_from_repo_defers_setup_when_script_configured_by_default() {
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let harness = CreateTestHarness::new();
 
+    // Setup script configured. auto_run_setup defaults to true (DB default
+    // 1), so the workspace defers to the frontend inspector for auto-run.
     harness.commit_repo_files(&[("helmor.json", r#"{"scripts":{"setup":"echo hello"}}"#)]);
 
     let response = workspaces::create_workspace_from_repo_impl(&harness.repo_id).unwrap();
 
-    // Setup script detected → deferred to frontend inspector.
     assert_eq!(response.created_state, WorkspaceState::SetupPending);
 
     let connection = Connection::open(harness.db_path()).unwrap();
@@ -109,6 +107,22 @@ fn create_workspace_from_repo_defers_setup_when_script_configured() {
         )
         .unwrap();
     assert_eq!(state, "setup_pending");
+}
+
+#[test]
+fn create_workspace_from_repo_stays_ready_when_auto_run_setup_disabled() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let harness = CreateTestHarness::new();
+
+    harness.commit_repo_files(&[("helmor.json", r#"{"scripts":{"setup":"echo hello"}}"#)]);
+    repos::update_repo_auto_run_setup(&harness.repo_id, false).unwrap();
+
+    let response = workspaces::create_workspace_from_repo_impl(&harness.repo_id).unwrap();
+
+    // User opted out → workspace lands in Ready; setup runs manually.
+    assert_eq!(response.created_state, WorkspaceState::Ready);
 }
 
 #[test]
@@ -244,9 +258,8 @@ fn finalize_workspace_transitions_initializing_to_ready_and_creates_worktree() {
     assert_eq!(finalized.workspace_id, prepared.workspace_id);
     assert_eq!(finalized.final_state, WorkspaceState::Ready);
 
-    // Worktree + scaffold exist after Phase 2.
+    // Worktree exists after Phase 2.
     assert!(workspace_dir.join(".git").exists());
-    assert!(workspace_dir.join(".context/notes.md").exists());
 
     // DB row flipped to ready.
     let connection = Connection::open(harness.db_path()).unwrap();
@@ -267,12 +280,32 @@ fn finalize_workspace_reports_setup_pending_when_helmor_json_has_setup() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let harness = CreateTestHarness::new();
 
+    // Default behavior: auto_run_setup=true, helmor.json sets a setup script
+    // → workspace defers to frontend inspector.
     harness.commit_repo_files(&[("helmor.json", r#"{"scripts":{"setup":"echo hi"}}"#)]);
 
     let prepared = workspaces::prepare_workspace_from_repo_impl(&harness.repo_id).unwrap();
     let finalized = workspaces::finalize_workspace_from_repo_impl(&prepared.workspace_id).unwrap();
 
     assert_eq!(finalized.final_state, WorkspaceState::SetupPending);
+}
+
+#[test]
+fn finalize_workspace_stays_ready_when_helmor_json_has_setup_but_auto_run_disabled() {
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let harness = CreateTestHarness::new();
+
+    harness.commit_repo_files(&[("helmor.json", r#"{"scripts":{"setup":"echo hi"}}"#)]);
+    repos::update_repo_auto_run_setup(&harness.repo_id, false).unwrap();
+
+    let prepared = workspaces::prepare_workspace_from_repo_impl(&harness.repo_id).unwrap();
+    let finalized = workspaces::finalize_workspace_from_repo_impl(&prepared.workspace_id).unwrap();
+
+    // User opted out → setup script is configured but the workspace lands
+    // in Ready; user must run setup manually.
+    assert_eq!(finalized.final_state, WorkspaceState::Ready);
 }
 
 #[test]
@@ -445,7 +478,7 @@ fn pr_lookups_short_circuit_for_initializing_workspace_without_network() {
 
     let status = crate::github_graphql::lookup_workspace_pr_action_status(&prepared.workspace_id)
         .expect("lookup_workspace_pr_action_status should succeed for initializing workspace");
-    assert!(status.pr.is_none());
+    assert!(status.change_request.is_none());
     assert!(status.deployments.is_empty());
     assert!(status.checks.is_empty());
 }

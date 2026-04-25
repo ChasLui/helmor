@@ -34,7 +34,7 @@ pub struct ConductorWorkspace {
     pub directory_name: String,
     pub state: String,
     pub branch: Option<String>,
-    pub derived_status: Option<String>,
+    pub status: Option<String>,
     pub pr_title: Option<String>,
     pub session_count: i64,
     pub message_count: i64,
@@ -142,7 +142,7 @@ pub fn list_conductor_workspaces(repo_id: &str) -> Result<Vec<ConductorWorkspace
                     directory_name: row.get(1)?,
                     state: row.get(2)?,
                     branch: row.get(3)?,
-                    derived_status: row.get(4)?,
+                    status: row.get(4)?,
                     pr_title: row.get(5)?,
                     session_count: row.get(6)?,
                     message_count: row.get(7)?,
@@ -442,7 +442,7 @@ fn import_workspace_db_records(conn: &Connection, workspace_id: &str) -> Result<
     }))
 }
 
-/// Phase 2: Set up filesystem for an imported workspace (git worktree + context files).
+/// Phase 2: Set up filesystem for an imported workspace.
 #[allow(clippy::too_many_arguments)]
 fn setup_workspace_filesystem(
     workspace_id: &str,
@@ -455,7 +455,7 @@ fn setup_workspace_filesystem(
     helmor_data_dir: &Path,
 ) -> Result<()> {
     if state != "archived" {
-        // Active workspace: create git worktree, then copy .context/
+        // Active workspace: create the git worktree.
         let workspace_dir = crate::data_dir::workspace_dir(repo_name, directory_name)?;
 
         if !workspace_dir.exists() {
@@ -501,53 +501,6 @@ fn setup_workspace_filesystem(
                 Err(e) => {
                     tracing::error!(directory_name, "Failed to open DB to update branch: {e}");
                 }
-            }
-        }
-
-        // Copy .context/ after the worktree exists.
-        if let Some(root) = conductor_root {
-            let context_src = root
-                .join("workspaces")
-                .join(repo_name)
-                .join(directory_name)
-                .join(".context");
-            let context_dst = workspace_dir.join(".context");
-
-            if context_src.is_dir() {
-                // Overwrite if exists — ensures clean state on re-import
-                if context_dst.exists() {
-                    std::fs::remove_dir_all(&context_dst).ok();
-                }
-                std::fs::create_dir_all(context_dst.parent().unwrap_or(&workspace_dir)).ok();
-                helpers::copy_dir_all(&context_src, &context_dst).with_context(|| {
-                    format!("Failed to copy .context from {}", context_src.display())
-                })?;
-            }
-        }
-    } else {
-        // Archived workspace: copy archived-contexts/
-        if let Some(root) = conductor_root {
-            let archive_src = root
-                .join("archived-contexts")
-                .join(repo_name)
-                .join(directory_name);
-            let archive_dst = helmor_data_dir
-                .join("archived-contexts")
-                .join(repo_name)
-                .join(directory_name);
-
-            if archive_src.is_dir() {
-                // Overwrite if exists — ensures clean state on re-import
-                if archive_dst.exists() {
-                    std::fs::remove_dir_all(&archive_dst).ok();
-                }
-                std::fs::create_dir_all(archive_dst.parent().unwrap_or(helmor_data_dir)).ok();
-                helpers::copy_dir_all(&archive_src, &archive_dst).with_context(|| {
-                    format!(
-                        "Failed to copy archived context from {}",
-                        archive_src.display()
-                    )
-                })?;
             }
         }
     }

@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
-import type { AgentModelSection, WorkspaceSessionSummary } from "./api";
+import type {
+	AgentModelSection,
+	WorkspaceRow,
+	WorkspaceSessionSummary,
+} from "./api";
 import {
 	clampEffort,
 	clampEffortToModel,
 	findModelOption,
 	getWorkspaceBranchTone,
 	inferDefaultModelId,
+	insertRowByCreatedAtDesc,
 	isNewSession,
 	resolveSessionDisplayProvider,
 	resolveSessionSelectedModelId,
@@ -120,35 +125,92 @@ describe("isNewSession", () => {
 
 describe("workspaceGroupIdFromStatus", () => {
 	it("maps done → done", () => {
-		expect(workspaceGroupIdFromStatus("done", null)).toBe("done");
+		expect(workspaceGroupIdFromStatus("done")).toBe("done");
 	});
 
 	it("maps review → review", () => {
-		expect(workspaceGroupIdFromStatus("review", null)).toBe("review");
+		expect(workspaceGroupIdFromStatus("review")).toBe("review");
 	});
 
 	it("maps in-review → review", () => {
-		expect(workspaceGroupIdFromStatus("in-review", null)).toBe("review");
+		expect(workspaceGroupIdFromStatus("in-review")).toBe("review");
 	});
 
 	it("maps backlog → backlog", () => {
-		expect(workspaceGroupIdFromStatus("backlog", null)).toBe("backlog");
+		expect(workspaceGroupIdFromStatus("backlog")).toBe("backlog");
 	});
 
 	it("maps cancelled → canceled", () => {
-		expect(workspaceGroupIdFromStatus("cancelled", null)).toBe("canceled");
+		expect(workspaceGroupIdFromStatus("cancelled")).toBe("canceled");
 	});
 
 	it("defaults to progress", () => {
-		expect(workspaceGroupIdFromStatus(null, null)).toBe("progress");
+		expect(workspaceGroupIdFromStatus(null)).toBe("progress");
 	});
 
-	it("manual status takes precedence over derived", () => {
-		expect(workspaceGroupIdFromStatus("done", "backlog")).toBe("done");
+	it("routes pinned rows to the pinned group regardless of status", () => {
+		expect(workspaceGroupIdFromStatus("done", "2024-01-01T00:00:00Z")).toBe(
+			"pinned",
+		);
 	});
 
-	it("falls back to derived when manual is null", () => {
-		expect(workspaceGroupIdFromStatus(null, "review")).toBe("review");
+	it("ignores a null/empty pinnedAt", () => {
+		expect(workspaceGroupIdFromStatus("done", null)).toBe("done");
+		expect(workspaceGroupIdFromStatus("done", undefined)).toBe("done");
+	});
+});
+
+describe("insertRowByCreatedAtDesc", () => {
+	const row = (id: string, createdAt?: string): WorkspaceRow => ({
+		id,
+		title: id,
+		...(createdAt ? { createdAt } : {}),
+	});
+
+	it("inserts at the correct position to preserve DESC order", () => {
+		const rows = [
+			row("a", "2024-03-01T00:00:00Z"),
+			row("b", "2024-02-01T00:00:00Z"),
+			row("c", "2024-01-01T00:00:00Z"),
+		];
+		const inserted = insertRowByCreatedAtDesc(
+			rows,
+			row("new", "2024-02-15T00:00:00Z"),
+		);
+		expect(inserted.map((r) => r.id)).toEqual(["a", "new", "b", "c"]);
+	});
+
+	it("appends when new row is the oldest", () => {
+		const rows = [
+			row("a", "2024-03-01T00:00:00Z"),
+			row("b", "2024-02-01T00:00:00Z"),
+		];
+		const inserted = insertRowByCreatedAtDesc(
+			rows,
+			row("new", "2023-01-01T00:00:00Z"),
+		);
+		expect(inserted.map((r) => r.id)).toEqual(["a", "b", "new"]);
+	});
+
+	it("prepends when new row is the newest", () => {
+		const rows = [
+			row("a", "2024-03-01T00:00:00Z"),
+			row("b", "2024-02-01T00:00:00Z"),
+		];
+		const inserted = insertRowByCreatedAtDesc(
+			rows,
+			row("new", "2025-01-01T00:00:00Z"),
+		);
+		expect(inserted.map((r) => r.id)).toEqual(["new", "a", "b"]);
+	});
+
+	it("treats a missing createdAt as newest", () => {
+		const rows = [
+			row("a", "2024-03-01T00:00:00Z"),
+			row("b", "2024-02-01T00:00:00Z"),
+		];
+		const inserted = insertRowByCreatedAtDesc(rows, row("new"));
+		expect(inserted.map((r) => r.id)).toEqual(["new", "a", "b"]);
 	});
 });
 
@@ -162,7 +224,7 @@ describe("getWorkspaceBranchTone", () => {
 	it("merged PR → merged", () => {
 		expect(
 			getWorkspaceBranchTone({
-				prInfo: { state: "MERGED", isMerged: true },
+				changeRequest: { state: "MERGED", isMerged: true },
 			}),
 		).toBe("merged");
 	});
@@ -170,7 +232,7 @@ describe("getWorkspaceBranchTone", () => {
 	it("open PR → open", () => {
 		expect(
 			getWorkspaceBranchTone({
-				prInfo: { state: "OPEN", isMerged: false },
+				changeRequest: { state: "OPEN", isMerged: false },
 			}),
 		).toBe("open");
 	});
@@ -178,13 +240,13 @@ describe("getWorkspaceBranchTone", () => {
 	it("closed PR → closed", () => {
 		expect(
 			getWorkspaceBranchTone({
-				prInfo: { state: "CLOSED", isMerged: false },
+				changeRequest: { state: "CLOSED", isMerged: false },
 			}),
 		).toBe("closed");
 	});
 
 	it("done status without PR → merged", () => {
-		expect(getWorkspaceBranchTone({ manualStatus: "done" })).toBe("merged");
+		expect(getWorkspaceBranchTone({ status: "done" })).toBe("merged");
 	});
 
 	it("default → working", () => {

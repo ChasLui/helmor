@@ -89,12 +89,6 @@ impl RestoreTestHarness {
         let session_id = "session-1".to_string();
         let branch = "feature/restore-target".to_string();
 
-        let archived_ctx =
-            crate::data_dir::archived_context_dir(&repo_name, &directory_name).unwrap();
-        fs::create_dir_all(archived_ctx.join("attachments")).unwrap();
-        fs::write(archived_ctx.join("notes.md"), "archived notes").unwrap();
-        fs::write(archived_ctx.join("attachments/evidence.txt"), "evidence").unwrap();
-
         let ws_dir = crate::data_dir::workspace_dir(&repo_name, &directory_name).unwrap();
         fs::create_dir_all(ws_dir.parent().unwrap()).unwrap();
 
@@ -123,10 +117,6 @@ impl RestoreTestHarness {
             directory_name,
             branch,
         }
-    }
-
-    pub(crate) fn archived_context_dir(&self) -> PathBuf {
-        crate::data_dir::archived_context_dir(&self.repo_name, &self.directory_name).unwrap()
     }
 
     pub(crate) fn workspace_dir(&self) -> PathBuf {
@@ -184,11 +174,6 @@ impl ArchiveTestHarness {
         )
         .unwrap();
 
-        let archived_ctx_parent = crate::data_dir::archived_contexts_dir()
-            .unwrap()
-            .join(&repo_name);
-        fs::create_dir_all(&archived_ctx_parent).unwrap();
-
         let ws_parent = crate::data_dir::workspaces_dir().unwrap().join(&repo_name);
         fs::create_dir_all(&ws_parent).unwrap();
 
@@ -209,13 +194,6 @@ impl ArchiveTestHarness {
         let workspace_dir = crate::data_dir::workspace_dir(&repo_name, &directory_name).unwrap();
         git_ops::point_branch_to_commit(&source_repo_root, &branch, &head_commit).unwrap();
         git_ops::create_worktree(&source_repo_root, &workspace_dir, &branch).unwrap();
-        fs::create_dir_all(workspace_dir.join(".context/attachments")).unwrap();
-        fs::write(workspace_dir.join(".context/notes.md"), "ready notes").unwrap();
-        fs::write(
-            workspace_dir.join(".context/attachments/evidence.txt"),
-            "ready evidence",
-        )
-        .unwrap();
 
         Self {
             _test_dir: test_dir,
@@ -228,16 +206,16 @@ impl ArchiveTestHarness {
         }
     }
 
-    pub(crate) fn archived_context_dir(&self) -> PathBuf {
-        crate::data_dir::archived_context_dir(&self.repo_name, &self.directory_name).unwrap()
-    }
-
     pub(crate) fn workspace_dir(&self) -> PathBuf {
         crate::data_dir::workspace_dir(&self.repo_name, &self.directory_name).unwrap()
     }
 
     pub(crate) fn source_repo_root(&self) -> PathBuf {
         self.root.join("source-repo")
+    }
+
+    pub(crate) fn archived_context_dir(&self) -> PathBuf {
+        self.root.join("archived-contexts").join(&self.workspace_id)
     }
 
     pub(crate) fn set_state(&self, state: &str) {
@@ -297,7 +275,7 @@ impl CreateTestHarness {
                 INSERT INTO workspaces (
                   id, repository_id, directory_name, active_session_id, branch,
                   state, initialization_parent_branch,
-                  intended_target_branch, derived_status, unread
+                  intended_target_branch, status, unread
                 ) VALUES (?1, ?2, ?3, NULL, ?4, 'ready', 'main', 'main', 'in-progress', 0)
                 "#,
                 (
@@ -725,7 +703,7 @@ fn create_archived_fixture_db(
         .unwrap();
     connection
         .execute(
-            r#"INSERT INTO workspaces (id, repository_id, directory_name, state, derived_status, branch, active_session_id, archive_commit) VALUES (?1, 'repo-1', ?2, 'archived', 'in-progress', ?3, ?4, ?5)"#,
+            r#"INSERT INTO workspaces (id, repository_id, directory_name, state, status, branch, active_session_id, archive_commit) VALUES (?1, 'repo-1', ?2, 'archived', 'in-progress', ?3, ?4, ?5)"#,
             [workspace_id, directory_name, branch, session_id, archive_commit],
         )
         .unwrap();
@@ -755,7 +733,7 @@ fn create_ready_fixture_db(
         .unwrap();
     connection
         .execute(
-            r#"INSERT INTO workspaces (id, repository_id, directory_name, state, derived_status, branch, active_session_id) VALUES (?1, 'repo-1', ?2, 'ready', 'in-progress', ?3, ?4)"#,
+            r#"INSERT INTO workspaces (id, repository_id, directory_name, state, status, branch, active_session_id) VALUES (?1, 'repo-1', ?2, 'ready', 'in-progress', ?3, ?4)"#,
             (workspace_id, directory_name, branch, session_id),
         )
         .unwrap();
@@ -808,7 +786,7 @@ fn create_branch_switch_fixture_db(
     connection
         .execute(
             r#"INSERT INTO workspaces (
-                id, repository_id, directory_name, state, derived_status,
+                id, repository_id, directory_name, state, status,
                 branch, initialization_parent_branch, intended_target_branch
               ) VALUES (?1, 'repo-1', ?2, 'ready', 'in-progress', ?3, 'main', 'main')"#,
             (workspace_id, directory_name, branch),

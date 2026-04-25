@@ -4,11 +4,13 @@ use serde::Serialize;
 use crate::{
     db,
     error::{coded, ErrorCode},
+    forge::ChangeRequestInfo,
     helpers,
     models::workspaces::{self as workspace_models, WorkspaceRecord},
     sessions,
-    workspace_derived_status::DerivedStatus,
+    workspace_pr_sync::PrSyncState,
     workspace_state::WorkspaceState,
+    workspace_status::WorkspaceStatus,
 };
 
 pub use super::archive::{
@@ -16,12 +18,12 @@ pub use super::archive::{
     ArchiveJobManager, PrepareArchiveWorkspaceResponse,
 };
 pub use super::branching::{
-    _reset_prefetch_rate_limit, list_remote_branches, prefetch_remote_refs,
-    push_workspace_to_remote, refresh_remote_and_realign, rename_workspace_branch,
-    sync_workspace_with_target_branch, update_intended_target_branch,
-    update_intended_target_branch_local, PrefetchRemoteRefsResponse, PushWorkspaceToRemoteResponse,
-    SyncWorkspaceTargetOutcome, SyncWorkspaceTargetResponse, UpdateIntendedTargetBranchInternal,
-    UpdateIntendedTargetBranchResponse,
+    _reset_prefetch_rate_limit, continue_workspace_from_target_branch, list_remote_branches,
+    prefetch_remote_refs, push_workspace_to_remote, refresh_remote_and_realign,
+    rename_workspace_branch, sync_workspace_with_target_branch, update_intended_target_branch,
+    update_intended_target_branch_local, ContinueWorkspaceResponse, PrefetchRemoteRefsResponse,
+    PushWorkspaceToRemoteResponse, SyncWorkspaceTargetOutcome, SyncWorkspaceTargetResponse,
+    UpdateIntendedTargetBranchInternal, UpdateIntendedTargetBranchResponse,
 };
 pub use super::lifecycle::{
     archive_workspace_impl, cleanup_orphaned_initializing_workspaces,
@@ -46,8 +48,7 @@ pub struct WorkspaceSidebarRow {
     pub has_unread: bool,
     pub workspace_unread: i64,
     pub unread_session_count: i64,
-    pub derived_status: DerivedStatus,
-    pub manual_status: Option<DerivedStatus>,
+    pub status: WorkspaceStatus,
     pub branch: Option<String>,
     pub active_session_id: Option<String>,
     pub active_session_title: Option<String>,
@@ -57,6 +58,7 @@ pub struct WorkspaceSidebarRow {
     pub pinned_at: Option<String>,
     pub session_count: i64,
     pub message_count: i64,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,16 +83,17 @@ pub struct WorkspaceSummary {
     pub has_unread: bool,
     pub workspace_unread: i64,
     pub unread_session_count: i64,
-    pub derived_status: DerivedStatus,
-    pub manual_status: Option<DerivedStatus>,
+    pub status: WorkspaceStatus,
     pub branch: Option<String>,
     pub active_session_id: Option<String>,
     pub active_session_title: Option<String>,
     pub active_session_agent_type: Option<String>,
     pub active_session_status: Option<String>,
     pub pr_title: Option<String>,
+    pub pinned_at: Option<String>,
     pub session_count: i64,
     pub message_count: i64,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,8 +114,7 @@ pub struct WorkspaceDetail {
     pub has_unread: bool,
     pub workspace_unread: i64,
     pub unread_session_count: i64,
-    pub derived_status: DerivedStatus,
-    pub manual_status: Option<DerivedStatus>,
+    pub status: WorkspaceStatus,
     pub active_session_id: Option<String>,
     pub active_session_title: Option<String>,
     pub active_session_agent_type: Option<String>,
@@ -152,12 +154,12 @@ pub fn list_workspace_groups() -> Result<Vec<WorkspaceSidebarGroup>> {
         if is_pinned {
             pinned.push(row);
         } else {
-            match helpers::effective_status(row.manual_status, row.derived_status) {
-                DerivedStatus::Done => done.push(row),
-                DerivedStatus::Review => review.push(row),
-                DerivedStatus::Backlog => backlog.push(row),
-                DerivedStatus::Canceled => canceled.push(row),
-                DerivedStatus::InProgress => progress.push(row),
+            match row.status {
+                WorkspaceStatus::Done => done.push(row),
+                WorkspaceStatus::Review => review.push(row),
+                WorkspaceStatus::Backlog => backlog.push(row),
+                WorkspaceStatus::Canceled => canceled.push(row),
+                WorkspaceStatus::InProgress => progress.push(row),
             }
         }
     }
@@ -285,18 +287,89 @@ pub fn unpin_workspace(workspace_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn set_workspace_manual_status(
-    workspace_id: &str,
-    status: Option<DerivedStatus>,
-) -> Result<()> {
+pub fn set_workspace_status(workspace_id: &str, status: WorkspaceStatus) -> Result<()> {
     let connection = db::write_conn()?;
     connection
         .execute(
-            "UPDATE workspaces SET manual_status = ?2, updated_at = datetime('now') WHERE id = ?1",
+            "UPDATE workspaces SET status = ?2, updated_at = datetime('now') WHERE id = ?1",
             rusqlite::params![workspace_id, status],
         )
-        .context("Failed to set workspace manual status")?;
+        .context("Failed to set workspace status")?;
     Ok(())
+}
+
+pub fn sync_workspace_pr_state(
+    workspace_id: &str,
+    change_request: Option<&ChangeRequestInfo>,
+) -> Result<bool> {
+    let record = workspace_models::load_workspace_record_by_id(workspace_id)?
+        .ok_or_else(|| coded(ErrorCode::WorkspaceNotFound))
+        .with_context(|| format!("Workspace not found: {workspace_id}"))?;
+    if !record.state.is_operational() {
+        return Ok(false);
+    }
+
+    let next = stabilize_pr_sync_state(
+        record.pr_sync_state,
+        pr_sync_state_from_change_request(change_request),
+    );
+    if record.pr_sync_state == next {
+        return Ok(false);
+    }
+
+    let target_status = match next {
+        PrSyncState::Open => Some(WorkspaceStatus::Review),
+        PrSyncState::Closed => Some(WorkspaceStatus::Canceled),
+        PrSyncState::Merged => Some(WorkspaceStatus::Done),
+        PrSyncState::None => None,
+    };
+
+    let connection = db::write_conn()?;
+    if let Some(status) = target_status {
+        connection
+            .execute(
+                r#"
+                UPDATE workspaces
+                SET pr_sync_state = ?2,
+                    status = ?3,
+                    updated_at = datetime('now')
+                WHERE id = ?1
+                "#,
+                rusqlite::params![workspace_id, next, status],
+            )
+            .context("Failed to sync workspace PR state")?;
+        return Ok(true);
+    }
+
+    connection
+        .execute(
+            "UPDATE workspaces SET pr_sync_state = ?2, updated_at = datetime('now') WHERE id = ?1",
+            rusqlite::params![workspace_id, next],
+        )
+        .context("Failed to record workspace PR sync state")?;
+    Ok(true)
+}
+
+fn pr_sync_state_from_change_request(change_request: Option<&ChangeRequestInfo>) -> PrSyncState {
+    let Some(change_request) = change_request else {
+        return PrSyncState::None;
+    };
+    if change_request.is_merged {
+        return PrSyncState::Merged;
+    }
+    match change_request.state.as_str() {
+        "OPEN" => PrSyncState::Open,
+        "CLOSED" => PrSyncState::Closed,
+        "MERGED" => PrSyncState::Merged,
+        _ => PrSyncState::None,
+    }
+}
+
+fn stabilize_pr_sync_state(current: PrSyncState, next: PrSyncState) -> PrSyncState {
+    match (current, next) {
+        (PrSyncState::Merged | PrSyncState::Closed, PrSyncState::Open) => current,
+        _ => next,
+    }
 }
 
 // ---- Linked directories (the /add-dir feature) ----
@@ -500,7 +573,7 @@ mod candidate_directories_tests {
     ) {
         conn.execute(
             "INSERT INTO workspaces (id, repository_id, directory_name, state,
-             derived_status, branch) VALUES (?1, ?2, ?3, ?4, 'in-progress', ?5)",
+             status, branch) VALUES (?1, ?2, ?3, ?4, 'in-progress', ?5)",
             rusqlite::params![id, repo_id, dir, state, branch],
         )
         .unwrap();
@@ -607,8 +680,7 @@ pub fn record_to_sidebar_row(record: WorkspaceRecord) -> WorkspaceSidebarRow {
         has_unread: record.has_unread,
         workspace_unread: record.workspace_unread,
         unread_session_count: record.unread_session_count,
-        derived_status: record.derived_status,
-        manual_status: record.manual_status,
+        status: record.status,
         branch: record.branch,
         active_session_id: record.active_session_id,
         active_session_title: record.active_session_title,
@@ -618,6 +690,7 @@ pub fn record_to_sidebar_row(record: WorkspaceRecord) -> WorkspaceSidebarRow {
         pinned_at: record.pinned_at,
         session_count: record.session_count,
         message_count: record.message_count,
+        created_at: record.created_at,
     }
 }
 
@@ -635,16 +708,17 @@ pub fn record_to_summary(record: WorkspaceRecord) -> WorkspaceSummary {
         has_unread: record.has_unread,
         workspace_unread: record.workspace_unread,
         unread_session_count: record.unread_session_count,
-        derived_status: record.derived_status,
-        manual_status: record.manual_status,
+        status: record.status,
         branch: record.branch,
         active_session_id: record.active_session_id,
         active_session_title: record.active_session_title,
         active_session_agent_type: record.active_session_agent_type,
         active_session_status: record.active_session_status,
         pr_title: record.pr_title,
+        pinned_at: record.pinned_at,
         session_count: record.session_count,
         message_count: record.message_count,
+        created_at: record.created_at,
     }
 }
 
@@ -681,8 +755,7 @@ pub fn record_to_detail(record: WorkspaceRecord) -> WorkspaceDetail {
         has_unread: record.has_unread,
         workspace_unread: record.workspace_unread,
         unread_session_count: record.unread_session_count,
-        derived_status: record.derived_status,
-        manual_status: record.manual_status,
+        status: record.status,
         active_session_id: record.active_session_id,
         active_session_title: record.active_session_title,
         active_session_agent_type: record.active_session_agent_type,
@@ -698,23 +771,31 @@ pub fn record_to_detail(record: WorkspaceRecord) -> WorkspaceDetail {
     }
 }
 
-/// Remove DB records for workspaces whose directory no longer exists on disk.
+/// Degrade operational workspaces whose directory no longer exists on disk
+/// to the `archived` state — preserving all chat history (sessions +
+/// session_messages) so the user can still find their conversations.
 ///
-/// Called once at startup so that externally-deleted directories don't cause
-/// repeated errors (e.g. git-status polling a missing path every 10 s).
+/// Called once at startup so that externally-deleted directories don't
+/// cause repeated errors (e.g. git-status polling a missing path every
+/// 10 s). The legacy behavior here was `permanently_delete_workspace`,
+/// which silently destroyed `session_messages` rows — never acceptable:
+/// a user may have rm -rf'd the worktree but still wants the chat history.
 ///
-/// Archived workspaces are excluded — their worktree is intentionally gone, but
-/// their archived `.context` and session history must be preserved.
+/// Archived rows are never touched (the worktree being gone is by design
+/// for those; their state is already correct).
+///
+/// Returns the number of workspaces that were degraded.
 pub fn purge_orphaned_workspaces() -> Result<usize> {
     let connection = db::read_conn()?;
-    let mut stmt = connection.prepare(
+    let mut stmt = connection.prepare(&format!(
         "SELECT w.id, r.name, w.directory_name, w.state
          FROM workspaces w
          JOIN repos r ON r.id = w.repository_id
-         WHERE w.state != ?1",
-    )?;
+         WHERE w.state {}",
+        crate::workspace_state::OPERATIONAL_FILTER
+    ))?;
     let orphans: Vec<(String, String, String, WorkspaceState)> = stmt
-        .query_map([WorkspaceState::Archived], |row| {
+        .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -729,35 +810,69 @@ pub fn purge_orphaned_workspaces() -> Result<usize> {
                 .unwrap_or(false)
         })
         .collect();
+    // Release the read connection so `degrade_workspace_to_archived`
+    // (which takes a write conn) doesn't deadlock on SQLite.
+    drop(stmt);
+    drop(connection);
 
     let mut count = 0;
     for (id, repo_name, dir_name, state) in &orphans {
-        // Defense in depth: even if the SQL filter ever regresses, never purge
-        // an archived workspace (the worktree being gone is by design).
+        // Defense in depth: even if the SQL filter ever regresses, never
+        // re-archive something that's already archived.
         if *state == WorkspaceState::Archived {
             tracing::warn!(
                 workspace_id = %id,
-                "Skipping archived workspace in orphan purge"
+                "Skipping archived workspace in orphan reconcile"
             );
             continue;
         }
-        if let Err(e) = permanently_delete_workspace(id) {
-            tracing::warn!(workspace_id = %id, "Failed to purge orphaned workspace: {e:#}");
-        } else {
-            count += 1;
-            tracing::info!(
-                workspace_id = %id,
-                path = %format!("{}/{}", repo_name, dir_name),
-                "Purged orphaned workspace (directory missing)"
-            );
+        match degrade_workspace_to_archived(id) {
+            Ok(true) => {
+                count += 1;
+                tracing::info!(
+                    workspace_id = %id,
+                    path = %format!("{}/{}", repo_name, dir_name),
+                    "Degraded orphaned workspace to archived (directory missing; chat history preserved)"
+                );
+            }
+            Ok(false) => {
+                // Another thread got there first (already archived).
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workspace_id = %id,
+                    "Failed to degrade orphaned workspace: {e:#}"
+                );
+            }
         }
     }
     Ok(count)
 }
 
+/// Flip a single workspace row from its current operational state to
+/// `archived`, without touching sessions / session_messages. Used by
+/// [`purge_orphaned_workspaces`] to reconcile workspaces whose worktree
+/// vanished externally. Idempotent: returns `Ok(false)` if the row is
+/// not operational or doesn't exist.
+pub fn degrade_workspace_to_archived(workspace_id: &str) -> Result<bool> {
+    let connection = db::write_conn()?;
+    let rows = connection
+        .execute(
+            &format!(
+                "UPDATE workspaces
+             SET state = 'archived',
+                 updated_at = datetime('now')
+             WHERE id = ?1 AND state {}",
+                crate::workspace_state::OPERATIONAL_FILTER
+            ),
+            [workspace_id],
+        )
+        .context("Failed to degrade workspace to archived")?;
+    Ok(rows > 0)
+}
+
 /// Permanently delete a workspace and all its data (sessions, messages)
-/// from the database, plus any filesystem artifacts (worktree directory,
-/// archived context).
+/// from the database, plus any filesystem artifacts (worktree directory).
 pub fn permanently_delete_workspace(workspace_id: &str) -> Result<()> {
     let mut connection = db::write_conn()?;
 
@@ -804,23 +919,11 @@ pub fn permanently_delete_workspace(workspace_id: &str) -> Result<()> {
     db::remove_workspace_lock(workspace_id);
 
     // Filesystem cleanup (best-effort)
-    if let Some((repo_name, directory_name, state)) = record {
+    if let Some((repo_name, directory_name, _state)) = record {
         // Remove worktree directory
         if let Ok(ws_dir) = crate::data_dir::workspace_dir(&repo_name, &directory_name) {
             if ws_dir.is_dir() {
                 std::fs::remove_dir_all(&ws_dir).ok();
-            }
-        }
-        // Remove archived context
-        if state == WorkspaceState::Archived {
-            if let Ok(data_dir) = crate::data_dir::data_dir() {
-                let archived = data_dir
-                    .join("archived-contexts")
-                    .join(&repo_name)
-                    .join(&directory_name);
-                if archived.is_dir() {
-                    std::fs::remove_dir_all(&archived).ok();
-                }
             }
         }
     }
@@ -842,6 +945,26 @@ mod tests {
             .unwrap() as usize
     }
 
+    fn workspace_state(env: &TestEnv, id: &str) -> Option<String> {
+        env.db_connection()
+            .query_row("SELECT state FROM workspaces WHERE id = ?1", [id], |row| {
+                row.get::<_, String>(0)
+            })
+            .ok()
+    }
+
+    fn count_session_messages(env: &TestEnv, workspace_id: &str) -> i64 {
+        env.db_connection()
+            .query_row(
+                "SELECT COUNT(*) FROM session_messages sm
+                 JOIN sessions s ON s.id = sm.session_id
+                 WHERE s.workspace_id = ?1",
+                [workspace_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap()
+    }
+
     #[test]
     fn purge_skips_archived_even_when_worktree_missing() {
         let env = TestEnv::new("purge-archived");
@@ -859,24 +982,18 @@ mod tests {
             },
         );
 
-        // Simulate post-archive on-disk state: archived context exists, worktree
-        // does not.
-        let archived_ctx = env.root.join("archived-contexts/demo/alpha");
-        fs::create_dir_all(&archived_ctx).unwrap();
-        fs::write(archived_ctx.join("notes.md"), "preserved").unwrap();
-
         let purged = purge_orphaned_workspaces().unwrap();
 
-        assert_eq!(purged, 0, "archived workspace must not be purged");
+        assert_eq!(purged, 0, "archived workspace must not be re-archived");
         assert_eq!(count_workspaces(&env), 1, "DB row must remain");
-        assert!(
-            archived_ctx.join("notes.md").exists(),
-            "archived context files must remain on disk"
+        assert_eq!(
+            workspace_state(&env, "w-archived").as_deref(),
+            Some("archived")
         );
     }
 
     #[test]
-    fn purge_removes_ready_workspace_with_missing_dir() {
+    fn purge_degrades_ready_workspace_with_missing_dir_to_archived() {
         let env = TestEnv::new("purge-ready");
         let conn = env.db_connection();
         insert_repo(&conn, "r1", "demo", None);
@@ -891,12 +1008,67 @@ mod tests {
                 intended_target_branch: None,
             },
         );
+        // Simulate a session with chat history so we can verify it survives.
+        conn.execute(
+            "INSERT INTO sessions (id, workspace_id, status, title) VALUES ('s1', 'w-ready', 'idle', 'Test')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_messages (id, session_id, sent_at, content) VALUES ('m1', 's1', datetime('now'), '{}')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(count_session_messages(&env, "w-ready"), 1);
         // No worktree dir created — simulates external deletion.
 
-        let purged = purge_orphaned_workspaces().unwrap();
+        let degraded = purge_orphaned_workspaces().unwrap();
 
-        assert_eq!(purged, 1, "ready workspace with missing dir must be purged");
-        assert_eq!(count_workspaces(&env), 0);
+        assert_eq!(
+            degraded, 1,
+            "ready workspace with missing dir must be degraded"
+        );
+        assert_eq!(
+            count_workspaces(&env),
+            1,
+            "DB row must be preserved, not deleted"
+        );
+        assert_eq!(
+            workspace_state(&env, "w-ready").as_deref(),
+            Some("archived"),
+            "state must flip to archived"
+        );
+        assert_eq!(
+            count_session_messages(&env, "w-ready"),
+            1,
+            "chat history must survive the degrade",
+        );
+    }
+
+    #[test]
+    fn purge_does_not_degrade_initializing_workspace_with_missing_dir() {
+        let env = TestEnv::new("purge-initializing");
+        let conn = env.db_connection();
+        insert_repo(&conn, "r1", "demo", None);
+        insert_workspace(
+            &conn,
+            &WorkspaceFixture {
+                id: "w-initializing",
+                repo_id: "r1",
+                directory_name: "delta",
+                state: WorkspaceState::Initializing.as_str(),
+                branch: Some("feature/delta"),
+                intended_target_branch: None,
+            },
+        );
+
+        let degraded = purge_orphaned_workspaces().unwrap();
+
+        assert_eq!(degraded, 0);
+        assert_eq!(
+            workspace_state(&env, "w-initializing").as_deref(),
+            Some("initializing"),
+        );
     }
 
     #[test]
@@ -922,5 +1094,135 @@ mod tests {
 
         assert_eq!(purged, 0);
         assert_eq!(count_workspaces(&env), 1);
+        assert_eq!(workspace_state(&env, "w-live").as_deref(), Some("ready"));
+    }
+
+    #[test]
+    fn pr_sync_moves_only_on_lifecycle_transitions() {
+        let env = TestEnv::new("pr-sync-transitions");
+        let conn = env.db_connection();
+        insert_repo(&conn, "r1", "demo", None);
+        insert_workspace(
+            &conn,
+            &WorkspaceFixture {
+                id: "w-pr",
+                repo_id: "r1",
+                directory_name: "alpha",
+                state: WorkspaceState::Ready.as_str(),
+                branch: Some("feature/alpha"),
+                intended_target_branch: None,
+            },
+        );
+
+        let open = ChangeRequestInfo {
+            url: "https://example.test/pr/1".to_string(),
+            number: 1,
+            state: "OPEN".to_string(),
+            title: "PR".to_string(),
+            is_merged: false,
+        };
+        assert!(sync_workspace_pr_state("w-pr", Some(&open)).unwrap());
+        assert_eq!(
+            workspace_statuses(&env, "w-pr"),
+            ("review".to_string(), "open".to_string())
+        );
+
+        conn.execute(
+            "UPDATE workspaces SET status = 'in-progress' WHERE id = 'w-pr'",
+            [],
+        )
+        .unwrap();
+        assert!(!sync_workspace_pr_state("w-pr", Some(&open)).unwrap());
+        assert_eq!(
+            workspace_statuses(&env, "w-pr"),
+            ("in-progress".to_string(), "open".to_string())
+        );
+
+        let merged = ChangeRequestInfo {
+            state: "MERGED".to_string(),
+            is_merged: true,
+            ..open
+        };
+        assert!(sync_workspace_pr_state("w-pr", Some(&merged)).unwrap());
+        assert_eq!(
+            workspace_statuses(&env, "w-pr"),
+            ("done".to_string(), "merged".to_string())
+        );
+    }
+
+    #[test]
+    fn pr_sync_does_not_regress_terminal_state_to_open() {
+        let env = TestEnv::new("pr-sync-terminal-no-regress");
+        let conn = env.db_connection();
+        insert_repo(&conn, "r1", "demo", None);
+        insert_workspace(
+            &conn,
+            &WorkspaceFixture {
+                id: "w-pr",
+                repo_id: "r1",
+                directory_name: "alpha",
+                state: WorkspaceState::Ready.as_str(),
+                branch: Some("feature/alpha"),
+                intended_target_branch: None,
+            },
+        );
+        conn.execute(
+            "UPDATE workspaces SET status = 'done', pr_sync_state = 'merged' WHERE id = 'w-pr'",
+            [],
+        )
+        .unwrap();
+
+        let stale_open = ChangeRequestInfo {
+            url: "https://example.test/pr/1".to_string(),
+            number: 1,
+            state: "OPEN".to_string(),
+            title: "PR".to_string(),
+            is_merged: false,
+        };
+
+        assert!(!sync_workspace_pr_state("w-pr", Some(&stale_open)).unwrap());
+        assert_eq!(
+            workspace_statuses(&env, "w-pr"),
+            ("done".to_string(), "merged".to_string())
+        );
+    }
+
+    #[test]
+    fn pr_sync_reports_change_when_request_disappears() {
+        let env = TestEnv::new("pr-sync-none-return");
+        let conn = env.db_connection();
+        insert_repo(&conn, "r1", "demo", None);
+        insert_workspace(
+            &conn,
+            &WorkspaceFixture {
+                id: "w-pr",
+                repo_id: "r1",
+                directory_name: "alpha",
+                state: WorkspaceState::Ready.as_str(),
+                branch: Some("feature/alpha"),
+                intended_target_branch: None,
+            },
+        );
+        conn.execute(
+            "UPDATE workspaces SET status = 'done', pr_sync_state = 'merged' WHERE id = 'w-pr'",
+            [],
+        )
+        .unwrap();
+
+        assert!(sync_workspace_pr_state("w-pr", None).unwrap());
+        assert_eq!(
+            workspace_statuses(&env, "w-pr"),
+            ("done".to_string(), "none".to_string())
+        );
+    }
+
+    fn workspace_statuses(env: &TestEnv, id: &str) -> (String, String) {
+        env.db_connection()
+            .query_row(
+                "SELECT status, pr_sync_state FROM workspaces WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
     }
 }

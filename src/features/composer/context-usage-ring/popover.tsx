@@ -1,72 +1,63 @@
-import { ClaudeBreakdown } from "./breakdowns";
+import { HelmorThinkingIndicator } from "@/components/helmor-thinking-indicator";
+import type { DisplayResolution } from "./parse";
 import {
-	type CodexRateLimitsDisplay,
-	type ContextUsageDisplay,
-	ringTier,
-} from "./parse";
-import {
-	Divider,
-	EmptyBlock,
-	LimitRow,
+	AutoCompactNote,
+	CategoryList,
+	TokensOnlyHeader,
 	UsageBar,
 	UsageHeader,
 } from "./popover-parts";
 
 type Props = {
-	display: ContextUsageDisplay | null;
-	/** Only meaningful when `display.source === "codex"`; ignored for
-	 *  Claude. Null when Codex hasn't emitted a snapshot yet. */
-	codexRateLimits?: CodexRateLimitsDisplay | null;
+	display: DisplayResolution;
+	/** True while the rich fetch is in-flight and we don't yet have
+	 *  fresh categories. */
+	richLoading?: boolean;
 };
 
-// State dispatch: empty placeholder vs. header + bar (+ source-specific
-// extras). Codex gets account-global rate limits below the bar; Claude
-// gets the categories breakdown and the auto-compact footer.
 export function ContextUsagePopoverContent({
 	display,
-	codexRateLimits = null,
+	richLoading = false,
 }: Props) {
-	if (!display) return <EmptyBlock />;
-
-	const hasCodexLimits =
-		display.source === "codex" &&
-		codexRateLimits !== null &&
-		(codexRateLimits.primary !== null || codexRateLimits.secondary !== null);
+	const showCategories =
+		display.kind === "full" &&
+		display.rich !== null &&
+		display.rich.categories.length > 0;
 
 	return (
 		<div className="flex flex-col gap-3 px-1 py-1">
-			<UsageHeader
-				used={display.used}
-				max={display.max}
-				percentage={display.percentage}
-			/>
-			<UsageBar
-				percentage={display.percentage}
-				tier={ringTier(display.percentage)}
-			/>
-
-			{display.source === "claude" ? (
-				<ClaudeBreakdown display={display} />
-			) : null}
-
-			{display.source === "claude" && display.autoCompacts ? (
-				<div className="text-[11px] text-muted-foreground">
-					Auto-compacts older turns when the window fills.
-				</div>
-			) : null}
-
-			{hasCodexLimits && codexRateLimits ? (
+			{display.kind === "tokensOnly" ? (
+				<TokensOnlyHeader usedTokens={display.usedTokens} />
+			) : display.kind === "full" ? (
 				<>
-					<Divider />
-					<div className="flex flex-col gap-2.5">
-						{codexRateLimits.primary ? (
-							<LimitRow window={codexRateLimits.primary} />
-						) : null}
-						{codexRateLimits.secondary ? (
-							<LimitRow window={codexRateLimits.secondary} />
-						) : null}
-					</div>
+					<UsageHeader
+						used={display.usedTokens}
+						max={display.maxTokens}
+						percentage={display.percentage}
+					/>
+					<UsageBar percentage={display.percentage} tier={display.tier} />
+					{showCategories && display.rich ? (
+						<>
+							<CategoryList
+								categories={display.rich.categories}
+								maxTokens={display.rich.maxTokens}
+							/>
+							{display.rich.isAutoCompactEnabled ? <AutoCompactNote /> : null}
+						</>
+					) : null}
 				</>
+			) : (
+				<>
+					<UsageHeader used={null} max={null} percentage={0} />
+					<UsageBar percentage={0} tier="default" />
+				</>
+			)}
+
+			{richLoading && !showCategories ? (
+				<div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+					<HelmorThinkingIndicator size={12} />
+					<span>Loading context details…</span>
+				</div>
 			) : null}
 		</div>
 	);

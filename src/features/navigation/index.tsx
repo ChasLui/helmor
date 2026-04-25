@@ -39,10 +39,10 @@ import {
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import type {
-	DerivedStatus,
 	RepositoryCreateOption,
 	WorkspaceGroup,
 	WorkspaceRow,
+	WorkspaceStatus,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { WorkspaceAvatar } from "./avatar";
@@ -114,8 +114,9 @@ export const WorkspacesSidebar = memo(function WorkspacesSidebar({
 	onMarkWorkspaceUnread,
 	onRestoreWorkspace,
 	onDeleteWorkspace,
+	onOpenInFinder,
 	onTogglePin,
-	onSetManualStatus,
+	onSetWorkspaceStatus,
 	archivingWorkspaceIds,
 	markingUnreadWorkspaceId,
 	restoringWorkspaceId,
@@ -144,11 +145,9 @@ export const WorkspacesSidebar = memo(function WorkspacesSidebar({
 	onMarkWorkspaceUnread?: (workspaceId: string) => void;
 	onRestoreWorkspace?: (workspaceId: string) => void;
 	onDeleteWorkspace?: (workspaceId: string) => void;
+	onOpenInFinder?: (workspaceId: string) => void;
 	onTogglePin?: (workspaceId: string, currentlyPinned: boolean) => void;
-	onSetManualStatus?: (
-		workspaceId: string,
-		status: DerivedStatus | null,
-	) => void;
+	onSetWorkspaceStatus?: (workspaceId: string, status: WorkspaceStatus) => void;
 	archivingWorkspaceIds?: Set<string>;
 	markingUnreadWorkspaceId?: string | null;
 	restoringWorkspaceId?: string | null;
@@ -432,8 +431,9 @@ export const WorkspacesSidebar = memo(function WorkspacesSidebar({
 						onPrefetch={onPrefetchWorkspace}
 						onArchiveWorkspace={onArchiveWorkspace}
 						onMarkWorkspaceUnread={onMarkWorkspaceUnread}
+						onOpenInFinder={onOpenInFinder}
 						onTogglePin={onTogglePin}
-						onSetManualStatus={onSetManualStatus}
+						onSetWorkspaceStatus={onSetWorkspaceStatus}
 						archivingWorkspaceIds={archivingWorkspaceIds}
 						markingUnreadWorkspaceId={markingUnreadWorkspaceId}
 						restoringWorkspaceId={restoringWorkspaceId}
@@ -463,7 +463,7 @@ export const WorkspacesSidebar = memo(function WorkspacesSidebar({
 			onRestoreWorkspace,
 			onDeleteWorkspace,
 			onTogglePin,
-			onSetManualStatus,
+			onSetWorkspaceStatus,
 			archivingWorkspaceIds,
 			markingUnreadWorkspaceId,
 			restoringWorkspaceId,
@@ -644,7 +644,7 @@ export const WorkspacesSidebar = memo(function WorkspacesSidebar({
 			<div
 				ref={scrollContainerRef}
 				data-slot="workspace-groups-scroll"
-				className="scrollbar-stable relative mt-2 min-h-0 flex-1 overflow-y-auto px-2 pr-1"
+				className="relative mt-2 min-h-0 flex-1 overflow-y-auto px-2 pr-3"
 			>
 				<div
 					style={{

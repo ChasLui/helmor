@@ -1,7 +1,7 @@
 import { memo, type ReactNode, useEffect } from "react";
 import type {
 	AgentProvider,
-	PullRequestInfo,
+	ChangeRequestInfo,
 	WorkspaceDetail,
 	WorkspaceSessionSummary,
 } from "@/lib/api";
@@ -14,6 +14,7 @@ import {
 	ConversationColdPlaceholder,
 	type PresentedSessionPane,
 } from "./thread-viewport";
+import type { SessionCloseRequest } from "./use-confirm-session-close";
 
 export {
 	AssistantToolCall,
@@ -23,7 +24,7 @@ export {
 
 type WorkspacePanelProps = {
 	workspace: WorkspaceDetail | null;
-	prInfo?: PullRequestInfo | null;
+	changeRequest?: ChangeRequestInfo | null;
 	sessions: WorkspaceSessionSummary[];
 	selectedSessionId: string | null;
 	sessionDisplayProviders?: Record<string, AgentProvider>;
@@ -40,6 +41,7 @@ type WorkspacePanelProps = {
 	onSessionsChanged?: () => void;
 	onSessionRenamed?: (sessionId: string, title: string) => void;
 	onWorkspaceChanged?: () => void;
+	onRequestCloseSession?: (request: SessionCloseRequest) => void;
 	headerActions?: ReactNode;
 	headerLeading?: ReactNode;
 	missingScriptTypes?: WorkspaceScriptType[];
@@ -48,7 +50,7 @@ type WorkspacePanelProps = {
 
 export const WorkspacePanel = memo(function WorkspacePanel({
 	workspace,
-	prInfo = null,
+	changeRequest = null,
 	sessions,
 	selectedSessionId,
 	sessionDisplayProviders,
@@ -65,6 +67,7 @@ export const WorkspacePanel = memo(function WorkspacePanel({
 	onSessionsChanged,
 	onSessionRenamed,
 	onWorkspaceChanged,
+	onRequestCloseSession,
 	headerActions,
 	headerLeading,
 	missingScriptTypes = [],
@@ -108,7 +111,7 @@ export const WorkspacePanel = memo(function WorkspacePanel({
 			<div className="flex min-h-0 flex-1 flex-col bg-transparent">
 				<WorkspacePanelHeader
 					workspace={workspace}
-					prInfo={prInfo}
+					changeRequest={changeRequest}
 					sessions={sessions}
 					selectedSessionId={selectedSessionId}
 					sessionDisplayProviders={sessionDisplayProviders}
@@ -123,6 +126,7 @@ export const WorkspacePanel = memo(function WorkspacePanel({
 					onSessionsChanged={onSessionsChanged}
 					onSessionRenamed={onSessionRenamed}
 					onWorkspaceChanged={onWorkspaceChanged}
+					onRequestCloseSession={onRequestCloseSession}
 				/>
 
 				<div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">

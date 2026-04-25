@@ -2,6 +2,7 @@ import { cva } from "class-variance-authority";
 import {
 	Archive,
 	Circle,
+	FolderOpen,
 	GitBranch,
 	LoaderCircle,
 	Pin,
@@ -32,7 +33,7 @@ import {
 	getScriptState,
 	subscribeStatus,
 } from "@/features/inspector/script-store";
-import type { DerivedStatus, WorkspaceRow } from "@/lib/api";
+import type { WorkspaceRow, WorkspaceStatus } from "@/lib/api";
 import { recordSidebarRowRender } from "@/lib/dev-render-debug";
 import { cn } from "@/lib/utils";
 import { getWorkspaceBranchTone } from "@/lib/workspace-helpers";
@@ -69,13 +70,11 @@ export type WorkspaceRowItemProps = {
 	onPrefetch?: (workspaceId: string) => void;
 	onArchiveWorkspace?: (workspaceId: string) => void;
 	onMarkWorkspaceUnread?: (workspaceId: string) => void;
+	onOpenInFinder?: (workspaceId: string) => void;
 	onRestoreWorkspace?: (workspaceId: string) => void;
 	onDeleteWorkspace?: (workspaceId: string) => void;
 	onTogglePin?: (workspaceId: string, currentlyPinned: boolean) => void;
-	onSetManualStatus?: (
-		workspaceId: string,
-		status: DerivedStatus | null,
-	) => void;
+	onSetWorkspaceStatus?: (workspaceId: string, status: WorkspaceStatus) => void;
 	archivingWorkspaceIds?: Set<string>;
 	markingUnreadWorkspaceId?: string | null;
 	restoringWorkspaceId?: string | null;
@@ -113,10 +112,11 @@ export const WorkspaceRowItem = memo(
 		onPrefetch,
 		onArchiveWorkspace,
 		onMarkWorkspaceUnread: _onMarkWorkspaceUnread,
+		onOpenInFinder,
 		onRestoreWorkspace,
 		onDeleteWorkspace,
 		onTogglePin,
-		onSetManualStatus,
+		onSetWorkspaceStatus,
 		archivingWorkspaceIds,
 		markingUnreadWorkspaceId,
 		restoringWorkspaceId,
@@ -157,12 +157,10 @@ export const WorkspaceRowItem = memo(
 			<Archive className="size-3.5" strokeWidth={1.9} />
 		);
 		const isPinned = Boolean(row.pinnedAt);
-		const effectiveStatus =
-			row.manualStatus ?? row.derivedStatus ?? "in-progress";
+		const effectiveStatus = row.status ?? "in-progress";
 		const branchTone = getWorkspaceBranchTone({
 			workspaceState: row.state,
-			manualStatus: row.manualStatus,
-			derivedStatus: row.derivedStatus,
+			status: row.status,
 		});
 		const statusDotLabel = isInteractionRequired
 			? "Interaction required"
@@ -350,7 +348,7 @@ export const WorkspaceRowItem = memo(
 							{STATUS_OPTIONS.map((opt) => (
 								<ContextMenuItem
 									key={opt.value}
-									onClick={() => onSetManualStatus?.(row.id, opt.value)}
+									onClick={() => onSetWorkspaceStatus?.(row.id, opt.value)}
 								>
 									<GroupIcon tone={opt.tone} />
 									<span className="flex-1">{opt.label}</span>
@@ -371,6 +369,16 @@ export const WorkspaceRowItem = memo(
 						>
 							<Circle className="size-4 shrink-0" strokeWidth={1.6} />
 							<span>Mark as unread</span>
+						</ContextMenuItem>
+					) : null}
+
+					{onOpenInFinder ? (
+						<ContextMenuItem
+							disabled={isBusy || Boolean(workspaceActionsDisabled)}
+							onClick={() => onOpenInFinder(row.id)}
+						>
+							<FolderOpen className="size-4 shrink-0" strokeWidth={1.6} />
+							<span>Open in Finder</span>
 						</ContextMenuItem>
 					) : null}
 

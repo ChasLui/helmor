@@ -69,7 +69,7 @@ describe("useUiSyncBridge", () => {
 				queryKey: helmorQueryKeys.workspaceGitActionStatus("workspace-1"),
 			});
 			expect(invalidateQueries).toHaveBeenCalledWith({
-				queryKey: helmorQueryKeys.workspacePrActionStatus("workspace-1"),
+				queryKey: helmorQueryKeys.workspaceForgeActionStatus("workspace-1"),
 			});
 			expect(invalidateQueries).toHaveBeenCalledWith({
 				predicate: expect.any(Function),
@@ -106,7 +106,7 @@ describe("useUiSyncBridge", () => {
 		});
 	});
 
-	it("invalidates the codex rate-limits query on codexRateLimitsChanged", async () => {
+	it("invalidates forge detection when forge state changes", async () => {
 		const queryClient = makeClient();
 		const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -120,18 +120,20 @@ describe("useUiSyncBridge", () => {
 		);
 
 		act(() => {
-			capturedSubscription?.({ type: "codexRateLimitsChanged" });
+			capturedSubscription?.({
+				type: "workspaceForgeChanged",
+				workspaceId: "workspace-1",
+			});
 		});
 
 		await waitFor(() => {
 			expect(invalidateQueries).toHaveBeenCalledWith({
-				queryKey: helmorQueryKeys.codexRateLimits,
+				queryKey: helmorQueryKeys.workspaceForge("workspace-1"),
 			});
 		});
-		expect(invalidateQueries).toHaveBeenCalledTimes(1);
 	});
 
-	it("invalidates only the per-session usage query on contextUsageChanged", async () => {
+	it("invalidates baseline + rich on contextUsageChanged", async () => {
 		const queryClient = makeClient();
 		const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
 
@@ -156,8 +158,12 @@ describe("useUiSyncBridge", () => {
 				queryKey: helmorQueryKeys.sessionContextUsage("session-7"),
 			});
 		});
-		// And only that key — no workspace-level cascades.
-		expect(invalidateQueries).toHaveBeenCalledTimes(1);
+		// And a predicate-based invalidate for rich entries scoped to
+		// this session (any providerSessionId / model).
+		expect(invalidateQueries).toHaveBeenCalledWith(
+			expect.objectContaining({ predicate: expect.any(Function) }),
+		);
+		expect(invalidateQueries).toHaveBeenCalledTimes(2);
 	});
 
 	it("reloads settings and refreshes auto-close queries on settings changes", async () => {

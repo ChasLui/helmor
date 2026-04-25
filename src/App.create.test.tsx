@@ -69,6 +69,7 @@ describe("App create workspace flow", () => {
 			setupFromProject: false,
 			runFromProject: false,
 			archiveFromProject: false,
+			autoRunSetup: true,
 		});
 		apiMocks.listRepositories.mockReset();
 		apiMocks.createWorkspaceFromRepo.mockReset();
@@ -131,8 +132,7 @@ describe("App create workspace flow", () => {
 						hasUnread: false,
 						workspaceUnread: 0,
 						unreadSessionCount: 0,
-						derivedStatus: "in-progress",
-						manualStatus: null,
+						status: "in-progress",
 						activeSessionId: createRuntime.sessionId,
 						activeSessionTitle: "Untitled",
 						activeSessionAgentType: "claude",
@@ -158,8 +158,7 @@ describe("App create workspace flow", () => {
 					hasUnread: false,
 					workspaceUnread: 0,
 					unreadSessionCount: 0,
-					derivedStatus: "in-progress",
-					manualStatus: null,
+					status: "in-progress",
 					activeSessionId: "session-existing",
 					activeSessionTitle: "Untitled",
 					activeSessionAgentType: "claude",

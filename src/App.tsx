@@ -1,10 +1,12 @@
 import "./App.css";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client";
+import { listen } from "@tauri-apps/api/event";
 import {
 	Check,
 	ChevronDown,
 	CircleAlertIcon,
+	FolderOpen,
 	PanelLeftClose,
 	PanelLeftOpen,
 } from "lucide-react";
@@ -29,8 +31,9 @@ import { WorkspaceInspectorSidebar } from "@/features/inspector";
 import { WorkspacesSidebarContainer } from "@/features/navigation/container";
 import { AppOnboarding } from "@/features/onboarding";
 import { seedNewSessionInCache } from "@/features/panel/session-cache";
-import { closeWorkspaceSession } from "@/features/panel/session-close";
+import { useConfirmSessionClose } from "@/features/panel/use-confirm-session-close";
 import { SettingsButton, SettingsDialog } from "@/features/settings";
+import { AppUpdateButton } from "@/features/updater/app-update-button";
 import { useAppUpdater } from "@/features/updater/use-app-updater";
 import {
 	hasSecondaryModifier,
@@ -55,13 +58,12 @@ import {
 import { useZoom } from "@/shell/use-zoom";
 import {
 	createSession,
-	type DerivedStatus,
 	drainPendingCliSends,
 	markSessionRead,
 	markSessionUnread,
 	openWorkspaceInEditor,
+	openWorkspaceInFinder,
 	prewarmSlashCommandsForWorkspace,
-	setWorkspaceManualStatus,
 	triggerWorkspaceFetch,
 	type WorkspaceDetail,
 	type WorkspaceGroup,
@@ -82,11 +84,12 @@ import {
 	helmorQueryKeys,
 	helmorQueryPersister,
 	sessionThreadMessagesQueryOptions,
+	workspaceChangeRequestQueryOptions,
 	workspaceDetailQueryOptions,
+	workspaceForgeActionStatusQueryOptions,
+	workspaceForgeQueryOptions,
 	workspaceGitActionStatusQueryOptions,
 	workspaceGroupsQueryOptions,
-	workspacePrActionStatusQueryOptions,
-	workspacePrQueryOptions,
 	workspaceSessionsQueryOptions,
 } from "./lib/query-client";
 import {
@@ -100,6 +103,7 @@ import {
 	type ThemeMode,
 	useSettings,
 } from "./lib/settings";
+import { flushSidebarListsIfIdle } from "./lib/sidebar-mutation-gate";
 import { useOsNotifications } from "./lib/use-os-notifications";
 import {
 	recomputeWorkspaceDetailUnread,
@@ -439,6 +443,12 @@ function AppShell({
 	const [settledSessionIds, setSettledSessionIds] = useState<Set<string>>(
 		() => new Set(),
 	);
+	// Sessions that terminated via abort (stop stream) rather than normal
+	// completion. Used by the commit lifecycle to return the button to idle
+	// when the user aborts an action session (e.g. Create PR).
+	const [abortedSessionIds, setAbortedSessionIds] = useState<Set<string>>(
+		() => new Set(),
+	);
 	const [interactionRequiredSessions, setInteractionRequiredSessions] =
 		useState<Map<string, string>>(() => new Map());
 	const interactionRequiredSessionIds = useMemo(
@@ -532,14 +542,14 @@ function AppShell({
 
 		void markSessionRead(sessionId)
 			.then(() => {
-				const invalidations = [
-					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.workspaceGroups,
-					}),
-					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.archivedWorkspaces,
-					}),
-				];
+				// Skip sidebar-list invalidations while a sidebar mutation
+				// (archive/restore/create/delete/pin) is in flight: the server
+				// state is mid-transition and a refetch here would overwrite
+				// the optimistic cache with a stale snapshot, bouncing the row
+				// back to its pre-mutation position. The mutation owner flushes
+				// these lists in its own `.finally`.
+				flushSidebarListsIfIdle(queryClient);
+				const invalidations: Promise<void>[] = [];
 				if (workspaceId) {
 					invalidations.push(
 						queryClient.invalidateQueries({
@@ -582,7 +592,7 @@ function AppShell({
 	]);
 
 	const { settings: appSettings } = useSettings();
-	useAppUpdater();
+	const appUpdateStatus = useAppUpdater();
 	useDockUnreadBadge();
 	useEnsureDefaultModel();
 	const notify = useOsNotifications(appSettings);
@@ -654,25 +664,31 @@ function AppShell({
 		return () => window.removeEventListener("keydown", handler, true);
 	}, [workspaceRootPath]);
 
-	// Persistent PR state for the current workspace's branch. Drives the
-	// commit button's resting mode and the "Git · PR #xxx" header badge.
-	// No `initializing` gate: the Rust impls short-circuit to the
-	// canonical "fresh workspace" answers (no PR, clean git tree) so the
-	// Phase 1 paint already matches what the Phase 2 refetch returns.
-	const workspacePrQuery = useQuery({
-		...workspacePrQueryOptions(selectedWorkspaceId ?? "__none__"),
-		enabled: isIdentityConnected && selectedWorkspaceId !== null,
+	const workspaceForgeQuery = useQuery({
+		...workspaceForgeQueryOptions(selectedWorkspaceId ?? "__none__"),
+		enabled: selectedWorkspaceId !== null,
 	});
-	const workspacePrInfo = workspacePrQuery.data ?? null;
+	const workspaceForge = workspaceForgeQuery.data ?? null;
+	const workspaceForgeProvider = workspaceForge?.provider ?? "unknown";
+	const workspaceForgeQueriesEnabled =
+		selectedWorkspaceId !== null &&
+		selectedWorkspaceDetail?.state !== "archived" &&
+		(workspaceForgeProvider === "gitlab" || isIdentityConnected);
 
-	// PR action status (mergeable, reviewDecision, checks) and local git
-	// status (uncommittedCount, conflictCount). These drive the commit
-	// button's mode derivation — shared cache with inspector's actions.tsx.
-	const workspacePrActionStatusQuery = useQuery({
-		...workspacePrActionStatusQueryOptions(selectedWorkspaceId ?? "__none__"),
-		enabled: isIdentityConnected && selectedWorkspaceId !== null,
+	const workspaceChangeRequestQuery = useQuery({
+		...workspaceChangeRequestQueryOptions(selectedWorkspaceId ?? "__none__"),
+		enabled: workspaceForgeQueriesEnabled,
 	});
-	const workspacePrActionStatus = workspacePrActionStatusQuery.data ?? null;
+	const workspaceChangeRequest = workspaceChangeRequestQuery.data ?? null;
+
+	const workspaceForgeActionStatusQuery = useQuery({
+		...workspaceForgeActionStatusQueryOptions(
+			selectedWorkspaceId ?? "__none__",
+		),
+		enabled: workspaceForgeQueriesEnabled,
+	});
+	const workspaceForgeActionStatus =
+		workspaceForgeActionStatusQuery.data ?? null;
 
 	const workspaceGitActionStatusQuery = useQuery({
 		...workspaceGitActionStatusQueryOptions(selectedWorkspaceId ?? "__none__"),
@@ -681,64 +697,6 @@ function AppShell({
 			selectedWorkspaceDetail?.state !== "archived",
 	});
 	const workspaceGitActionStatus = workspaceGitActionStatusQuery.data ?? null;
-
-	// Reactively transition workspace sidebar status when the PR query
-	// detects a state change. Handles PRs created/merged/closed externally.
-	const selectedWorkspaceManualStatus =
-		selectedWorkspaceDetailQuery.data?.manualStatus ?? null;
-	const selectedWorkspaceState =
-		selectedWorkspaceDetailQuery.data?.state ?? null;
-	const prStatusSyncRef = useRef<string | null>(null);
-	useEffect(() => {
-		if (!selectedWorkspaceId || !workspacePrInfo) {
-			prStatusSyncRef.current = null;
-			return;
-		}
-		if (
-			selectedWorkspaceState !== "ready" &&
-			selectedWorkspaceState !== "setup_pending"
-		) {
-			return;
-		}
-
-		let targetStatus: DerivedStatus | null = null;
-		if (workspacePrInfo.isMerged) {
-			targetStatus = "done";
-		} else if (workspacePrInfo.state === "OPEN") {
-			targetStatus = "review";
-		} else if (workspacePrInfo.state === "CLOSED") {
-			targetStatus = "canceled";
-		}
-
-		if (!targetStatus) return;
-		if (selectedWorkspaceManualStatus === targetStatus) return;
-
-		const syncKey = `${selectedWorkspaceId}:${targetStatus}`;
-		if (prStatusSyncRef.current === syncKey) return;
-		prStatusSyncRef.current = syncKey;
-
-		void (async () => {
-			try {
-				await setWorkspaceManualStatus(selectedWorkspaceId, targetStatus);
-				await Promise.all([
-					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.workspaceGroups,
-					}),
-					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.workspaceDetail(selectedWorkspaceId),
-					}),
-				]);
-			} catch (error) {
-				console.error("[prStatusSync] Failed:", error);
-			}
-		})();
-	}, [
-		selectedWorkspaceId,
-		workspacePrInfo,
-		selectedWorkspaceManualStatus,
-		selectedWorkspaceState,
-		queryClient,
-	]);
 
 	const clearWorkspaceRuntimeState = useCallback(() => {
 		selectedWorkspaceIdRef.current = null;
@@ -1350,11 +1308,16 @@ function AppShell({
 		selectedWorkspaceId,
 		selectedWorkspaceIdRef,
 		selectedRepoId: selectedWorkspaceDetailQuery.data?.repoId ?? null,
-		workspaceManualStatus: selectedWorkspaceManualStatus,
-		workspacePrInfo,
-		workspacePrActionStatus,
+		selectedWorkspaceTargetBranch:
+			selectedWorkspaceDetailQuery.data?.intendedTargetBranch ??
+			selectedWorkspaceDetailQuery.data?.defaultBranch ??
+			null,
+		changeRequest: workspaceChangeRequest,
+		forgeDetection: workspaceForge,
+		forgeActionStatus: workspaceForgeActionStatus,
 		workspaceGitActionStatus,
 		completedSessionIds: settledSessionIds,
+		abortedSessionIds,
 		interactionRequiredSessionIds,
 		sendingSessionIds,
 		onSelectSession: handleSelectSession,
@@ -1376,22 +1339,19 @@ function AppShell({
 			// sidebar workspace dot and the dock badge.
 			if (!isCurrentSession) {
 				void markSessionUnread(sessionId)
-					.then(() =>
-						Promise.all([
-							queryClient.invalidateQueries({
-								queryKey: helmorQueryKeys.workspaceGroups,
-							}),
-							queryClient.invalidateQueries({
-								queryKey: helmorQueryKeys.archivedWorkspaces,
-							}),
+					.then(() => {
+						// Same rationale as the mark-read path — defer the
+						// sidebar-list flush when a mutation owns the cache.
+						flushSidebarListsIfIdle(queryClient);
+						return Promise.all([
 							queryClient.invalidateQueries({
 								queryKey: helmorQueryKeys.workspaceDetail(workspaceId),
 							}),
 							queryClient.invalidateQueries({
 								queryKey: helmorQueryKeys.workspaceSessions(workspaceId),
 							}),
-						]),
-					)
+						]);
+					})
 					.catch((error) => {
 						console.error("[app] mark session unread on completion:", error);
 					});
@@ -1406,6 +1366,15 @@ function AppShell({
 		},
 		[notify, queryClient],
 	);
+
+	const handleSessionAborted = useCallback((sessionId: string) => {
+		setAbortedSessionIds((prev) => {
+			if (prev.has(sessionId)) return prev;
+			const next = new Set(prev);
+			next.add(sessionId);
+			return next;
+		});
+	}, []);
 
 	const lastInteractionCountsRef = useRef<Map<string, number>>(new Map());
 	const handleInteractionSessionsChange = useCallback(
@@ -1473,53 +1442,50 @@ function AppShell({
 			sessionId,
 			workspace,
 			sessions,
+			session: sessions.find((candidate) => candidate.id === sessionId) ?? null,
 		};
 	}, [queryClient]);
 
+	const { requestClose: requestCloseSession, dialogNode: closeConfirmDialog } =
+		useConfirmSessionClose({
+			sendingSessionIds,
+			onSelectSession: handleSelectSession,
+			pushToast: pushWorkspaceToast,
+			queryClient,
+		});
+
 	const handleCloseSelectedSession = useCallback(async () => {
 		const currentSession = getCloseableCurrentSession();
-		if (!currentSession) {
-			return false;
+		if (!currentSession?.session) {
+			return;
 		}
 
-		await closeWorkspaceSession({
-			queryClient,
-			workspace: currentSession.workspace,
-			sessions: currentSession.sessions,
-			sessionId: currentSession.sessionId,
-			onSelectSession: handleSelectSession,
+		const { workspaceId, sessionId, workspace, sessions, session } =
+			currentSession;
+
+		await requestCloseSession({
+			workspace,
+			sessions,
+			session,
+			activateAdjacent: true,
 			onSessionsChanged: () => {
 				void Promise.all([
 					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.workspaceDetail(
-							currentSession.workspaceId,
-						),
+						queryKey: helmorQueryKeys.workspaceDetail(workspaceId),
 					}),
 					queryClient.invalidateQueries({
-						queryKey: helmorQueryKeys.workspaceSessions(
-							currentSession.workspaceId,
-						),
+						queryKey: helmorQueryKeys.workspaceSessions(workspaceId),
 					}),
 					queryClient.invalidateQueries({
 						queryKey: helmorQueryKeys.workspaceGroups,
 					}),
 					queryClient.invalidateQueries({
-						queryKey: [
-							...helmorQueryKeys.sessionMessages(currentSession.sessionId),
-							"thread",
-						],
+						queryKey: [...helmorQueryKeys.sessionMessages(sessionId), "thread"],
 					}),
 				]);
 			},
-			pushToast: pushWorkspaceToast,
 		});
-		return true;
-	}, [
-		getCloseableCurrentSession,
-		handleSelectSession,
-		pushWorkspaceToast,
-		queryClient,
-	]);
+	}, [getCloseableCurrentSession, queryClient, requestCloseSession]);
 
 	const handleCreateSession = useCallback(async () => {
 		const workspaceId = selectedWorkspaceIdRef.current;
@@ -1773,6 +1739,39 @@ function AppShell({
 			return;
 		}
 
+		let disposed = false;
+		let unlisten: (() => void) | undefined;
+
+		void listen("helmor://close-current-session", () => {
+			if (!getCloseableCurrentSession()) {
+				return;
+			}
+
+			void handleCloseSelectedSession();
+		}).then((fn) => {
+			if (disposed) {
+				fn();
+				return;
+			}
+			unlisten = fn;
+		});
+
+		return () => {
+			disposed = true;
+			unlisten?.();
+		};
+	}, [
+		getCloseableCurrentSession,
+		handleCloseSelectedSession,
+		isIdentityConnected,
+		workspaceViewMode,
+	]);
+
+	useEffect(() => {
+		if (!isIdentityConnected || workspaceViewMode === "editor") {
+			return;
+		}
+
 		const handleWindowKeyDown = (event: globalThis.KeyboardEvent) => {
 			// Cmd+W (macOS) / Ctrl+W (Windows / Linux). Reject alt/shift combos
 			// and the opposite OS's modifier (macOS Ctrl / Win/Linux Cmd).
@@ -1957,18 +1956,21 @@ function AppShell({
 														pushWorkspaceToast={pushWorkspaceToast}
 													/>
 												</div>
-												<Button
-													aria-label="Collapse sidebar"
-													onClick={() => setSidebarCollapsed(true)}
-													variant="ghost"
-													size="icon-xs"
-													className="absolute right-[12px] top-[6px] z-20 text-muted-foreground hover:text-foreground"
-												>
-													<PanelLeftClose
-														className="size-4"
-														strokeWidth={1.8}
-													/>
-												</Button>
+												<div className="absolute right-[12px] top-[6px] z-20 flex items-center gap-[2px]">
+													<AppUpdateButton status={appUpdateStatus} />
+													<Button
+														aria-label="Collapse sidebar"
+														onClick={() => setSidebarCollapsed(true)}
+														variant="ghost"
+														size="icon-xs"
+														className="text-muted-foreground hover:text-foreground"
+													>
+														<PanelLeftClose
+															className="size-4"
+															strokeWidth={1.8}
+														/>
+													</Button>
+												</div>
 												<div className="flex shrink-0 items-center justify-between px-3 pb-3 pt-1">
 													<SettingsButton onClick={handleOpenSettings} />
 													{githubIdentityState.status === "connected" ? (
@@ -2073,7 +2075,8 @@ function AppShell({
 													interactionRequiredSessionIds
 												}
 												onSessionCompleted={handleSessionCompleted}
-												workspacePrInfo={workspacePrInfo}
+												workspaceChangeRequest={workspaceChangeRequest}
+												onSessionAborted={handleSessionAborted}
 												pendingPromptForSession={pendingPromptForSession}
 												onPendingPromptConsumed={handlePendingPromptConsumed}
 												pendingInsertRequests={pendingComposerInserts}
@@ -2083,6 +2086,7 @@ function AppShell({
 												onQueuePendingPromptForSession={
 													queuePendingPromptForSession
 												}
+												onRequestCloseSession={requestCloseSession}
 												workspaceRootPath={workspaceRootPath}
 												onOpenFileReference={handleOpenFileReference}
 												headerLeading={
@@ -2090,18 +2094,21 @@ function AppShell({
 														<>
 															{/* Spacer to avoid macOS traffic lights */}
 															<div className="w-[52px] shrink-0" />
-															<Button
-																aria-label="Expand sidebar"
-																onClick={() => setSidebarCollapsed(false)}
-																variant="ghost"
-																size="icon-xs"
-																className="text-muted-foreground hover:text-foreground"
-															>
-																<PanelLeftOpen
-																	className="size-4"
-																	strokeWidth={1.8}
-																/>
-															</Button>
+															<div className="flex items-center gap-[2px]">
+																<AppUpdateButton status={appUpdateStatus} />
+																<Button
+																	aria-label="Expand sidebar"
+																	onClick={() => setSidebarCollapsed(false)}
+																	variant="ghost"
+																	size="icon-xs"
+																	className="text-muted-foreground hover:text-foreground"
+																>
+																	<PanelLeftOpen
+																		className="size-4"
+																		strokeWidth={1.8}
+																	/>
+																</Button>
+															</div>
 														</>
 													) : undefined
 												}
@@ -2153,6 +2160,25 @@ function AppShell({
 																	sideOffset={6}
 																	className="min-w-[11rem]"
 																>
+																	<DropdownMenuItem
+																		onClick={() => {
+																			void openWorkspaceInFinder(
+																				selectedWorkspaceId,
+																			).catch((e) =>
+																				pushWorkspaceToast(
+																					String(e),
+																					"Failed to open Finder",
+																				),
+																			);
+																		}}
+																		className="flex items-center gap-2"
+																	>
+																		<FolderOpen
+																			className="shrink-0"
+																			strokeWidth={1.8}
+																		/>
+																		<span className="flex-1">Finder</span>
+																	</DropdownMenuItem>
 																	{installedEditors.map((editor) => (
 																		<DropdownMenuItem
 																			key={editor.id}
@@ -2258,7 +2284,7 @@ function AppShell({
 										}
 										commitButtonMode={commitButtonMode}
 										commitButtonState={commitButtonState}
-										prInfo={workspacePrInfo}
+										changeRequest={workspaceChangeRequest}
 										onOpenSettings={handleOpenSettings}
 									/>
 								</aside>
@@ -2270,6 +2296,7 @@ function AppShell({
 						position="bottom-right"
 						visibleToasts={6}
 					/>
+					{closeConfirmDialog}
 				</ComposerInsertProvider>
 			</WorkspaceToastProvider>
 			<QuitConfirmDialog sendingSessionIds={sendingSessionIds} />

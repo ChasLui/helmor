@@ -20,7 +20,9 @@ pub struct RepositoryCreateOption {
     pub id: String,
     pub name: String,
     pub remote: Option<String>,
+    pub remote_url: Option<String>,
     pub default_branch: Option<String>,
+    pub forge_provider: Option<String>,
     pub repo_icon_src: Option<String>,
     pub repo_initials: String,
 }
@@ -48,6 +50,9 @@ pub struct ResolvedRepositoryInput {
     pub remote: Option<String>,
     pub remote_url: Option<String>,
     pub default_branch: String,
+    /// Forge classification cached on the repo record. Set at repo-creation
+    /// time by `crate::forge::detect_provider_for_repo_offline`.
+    pub forge_provider: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +65,14 @@ pub(crate) struct RepositoryRecord {
     pub setup_script: Option<String>,
     #[allow(dead_code)] // Queried separately via RepoScripts; kept here for completeness.
     pub run_script: Option<String>,
+    /// Auto-run the setup script when a workspace is created.
+    /// Defaults to true; users disable it from repo settings.
+    pub auto_run_setup: bool,
+    /// Cached forge classification ("github" / "gitlab" / "unknown").
+    /// NULL for repos created before the detection feature — the loader
+    /// re-runs detection on demand in that case.
+    #[allow(dead_code)]
+    pub forge_provider: Option<String>,
 }
 
 pub fn list_repositories() -> Result<Vec<RepositoryCreateOption>> {
@@ -72,7 +85,9 @@ pub fn list_repositories() -> Result<Vec<RepositoryCreateOption>> {
               name,
               default_branch,
               root_path,
-              remote
+              remote,
+              remote_url,
+              forge_provider
             FROM repos
             WHERE COALESCE(hidden, 0) = 0
             ORDER BY COALESCE(display_order, 0) ASC, LOWER(name) ASC
@@ -91,6 +106,8 @@ pub fn list_repositories() -> Result<Vec<RepositoryCreateOption>> {
                 id: row.get(0)?,
                 name,
                 remote: row.get(4)?,
+                remote_url: row.get(5)?,
+                forge_provider: row.get(6)?,
                 default_branch: row.get(2)?,
                 repo_icon_src: icon_src,
                 repo_initials: initials,
@@ -107,7 +124,7 @@ pub(crate) fn load_repository_by_id(repo_id: &str) -> Result<Option<RepositoryRe
     let mut statement = connection
         .prepare(
             r#"
-            SELECT id, name, remote, default_branch, root_path, setup_script, run_script
+            SELECT id, name, remote, default_branch, root_path, setup_script, run_script, auto_run_setup, forge_provider
             FROM repos
             WHERE id = ?1
             "#,
@@ -124,6 +141,8 @@ pub(crate) fn load_repository_by_id(repo_id: &str) -> Result<Option<RepositoryRe
                 root_path: row.get(4)?,
                 setup_script: row.get(5)?,
                 run_script: row.get(6)?,
+                auto_run_setup: row.get::<_, Option<i64>>(7)?.unwrap_or(1) != 0,
+                forge_provider: row.get(8)?,
             })
         })
         .with_context(|| format!("Failed to query repository {repo_id}"))?;
@@ -175,7 +194,7 @@ fn query_repository_by_root_path(
     let mut statement = connection
         .prepare(
             r#"
-            SELECT id, name, remote, default_branch, root_path, setup_script, run_script
+            SELECT id, name, remote, default_branch, root_path, setup_script, run_script, auto_run_setup, forge_provider
             FROM repos
             WHERE root_path = ?1
             ORDER BY created_at ASC
@@ -194,6 +213,8 @@ fn query_repository_by_root_path(
                 root_path: row.get(4)?,
                 setup_script: row.get(5)?,
                 run_script: row.get(6)?,
+                auto_run_setup: row.get::<_, Option<i64>>(7)?.unwrap_or(1) != 0,
+                forge_provider: row.get(8)?,
             })
         })
         .with_context(|| format!("Failed to query repository row for {root_path}"))?;
@@ -214,7 +235,7 @@ fn query_repository_candidates_by_name(
     let mut statement = connection
         .prepare(
             r#"
-            SELECT id, name, remote, default_branch, root_path, setup_script, run_script
+            SELECT id, name, remote, default_branch, root_path, setup_script, run_script, auto_run_setup, forge_provider
             FROM repos
             WHERE name = ?1 OR root_path LIKE ?2
             ORDER BY created_at ASC
@@ -234,6 +255,8 @@ fn query_repository_candidates_by_name(
                 root_path: row.get(4)?,
                 setup_script: row.get(5)?,
                 run_script: row.get(6)?,
+                auto_run_setup: row.get::<_, Option<i64>>(7)?.unwrap_or(1) != 0,
+                forge_provider: row.get(8)?,
             })
         })
         .with_context(|| format!("Failed to query repository candidates for {repository_name}"))?;
@@ -270,9 +293,10 @@ pub(crate) fn insert_repository(repository: &ResolvedRepositoryInput) -> Result<
               setup_script,
               run_script,
               archive_script,
+              forge_provider,
               created_at,
               updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, NULL, NULL, NULL, datetime('now'), datetime('now'))
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, NULL, NULL, NULL, ?8, datetime('now'), datetime('now'))
             "#,
             (
                 repo_id.as_str(),
@@ -282,6 +306,7 @@ pub(crate) fn insert_repository(repository: &ResolvedRepositoryInput) -> Result<
                 repository.remote_url.as_deref(),
                 repository.default_branch.as_str(),
                 next_display_order,
+                repository.forge_provider.as_deref(),
             ),
         )
         .with_context(|| format!("Failed to insert repository {}", repository.name))?;
@@ -313,11 +338,19 @@ pub fn update_repository_remote(
         })?;
     let new_remote_url = resolve_repository_remote_url(&repo_root, remote).ok();
 
+    // Re-classify locally when the remote swaps; no network or CLI probes
+    // on this settings path.
+    let (new_provider, _) = crate::forge::detect_provider_for_repo_offline(
+        new_remote_url.as_deref(),
+        Some(repo_root.as_path()),
+    );
+    let new_forge_provider = new_provider.as_storage_str().to_string();
+
     let connection = db::write_conn()?;
     let updated = connection
         .execute(
-            "UPDATE repos SET remote = ?1, default_branch = ?2, remote_url = ?3, updated_at = datetime('now') WHERE id = ?4",
-            rusqlite::params![remote, new_default_branch, new_remote_url, repo_id],
+            "UPDATE repos SET remote = ?1, default_branch = ?2, remote_url = ?3, forge_provider = ?4, updated_at = datetime('now') WHERE id = ?5",
+            rusqlite::params![remote, new_default_branch, new_remote_url, new_forge_provider, repo_id],
         )
         .with_context(|| format!("Failed to update remote for {repo_id}"))?;
 
@@ -368,6 +401,20 @@ pub fn list_repo_remotes(repo_id: &str) -> Result<Vec<String>> {
     git_ops::list_remotes(&repo_root)
 }
 
+/// Write the forge_provider cache for a repo. Called on the legacy path
+/// where `get_workspace_forge` ran detection because the row predates this
+/// feature — persisting avoids re-detecting on every subsequent query.
+pub fn update_repository_forge_provider(repo_id: &str, provider: &str) -> Result<()> {
+    let connection = db::write_conn()?;
+    connection
+        .execute(
+            "UPDATE repos SET forge_provider = ?1, updated_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![provider, repo_id],
+        )
+        .with_context(|| format!("Failed to update forge_provider for {repo_id}"))?;
+    Ok(())
+}
+
 pub fn update_repository_default_branch(repo_id: &str, default_branch: &str) -> Result<()> {
     let connection = db::write_conn()?;
     let updated = connection
@@ -393,6 +440,9 @@ pub struct RepoScripts {
     pub setup_from_project: bool,
     pub run_from_project: bool,
     pub archive_from_project: bool,
+    /// Auto-run setup on workspace creation. DB-only — not configurable
+    /// from `helmor.json`. Defaults to true.
+    pub auto_run_setup: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -444,15 +494,18 @@ pub fn load_repo_scripts(repo_id: &str, workspace_id: Option<&str>) -> Result<Re
     // config doesn't provide a value.
     let connection = db::read_conn()?;
     let mut statement = connection
-        .prepare("SELECT setup_script, run_script, archive_script FROM repos WHERE id = ?1")
+        .prepare(
+            "SELECT setup_script, run_script, archive_script, auto_run_setup FROM repos WHERE id = ?1",
+        )
         .with_context(|| format!("Failed to prepare script lookup for {repo_id}"))?;
 
-    let (db_setup, db_run, db_archive) = statement
+    let (db_setup, db_run, db_archive, auto_run_setup) = statement
         .query_row([repo_id], |row| {
             Ok((
                 row.get::<_, Option<String>>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<i64>>(3)?.unwrap_or(1) != 0,
             ))
         })
         .with_context(|| format!("Repository not found: {repo_id}"))?;
@@ -473,6 +526,7 @@ pub fn load_repo_scripts(repo_id: &str, workspace_id: Option<&str>) -> Result<Re
         setup_from_project,
         run_from_project,
         archive_from_project,
+        auto_run_setup,
     })
 }
 
@@ -542,6 +596,24 @@ pub fn update_repo_scripts(
             rusqlite::params![setup_script, run_script, archive_script, repo_id],
         )
         .with_context(|| format!("Failed to update scripts for {repo_id}"))?;
+
+    if updated != 1 {
+        bail!("Repository not found: {repo_id}");
+    }
+
+    Ok(())
+}
+
+/// Persist the user opt-in flag that controls whether the setup script
+/// auto-runs on workspace creation.
+pub fn update_repo_auto_run_setup(repo_id: &str, enabled: bool) -> Result<()> {
+    let connection = db::write_conn()?;
+    let updated = connection
+        .execute(
+            "UPDATE repos SET auto_run_setup = ?1, updated_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![if enabled { 1 } else { 0 }, repo_id],
+        )
+        .with_context(|| format!("Failed to update auto_run_setup for {repo_id}"))?;
 
     if updated != 1 {
         bail!("Repository not found: {repo_id}");
@@ -692,12 +764,20 @@ pub fn resolve_repository_from_local_path(folder_path: &str) -> Result<ResolvedR
             )
         })?;
 
+    // Keep repo creation local: no network probes or CLI calls here.
+    let (provider, _) = crate::forge::detect_provider_for_repo_offline(
+        remote_url.as_deref(),
+        Some(normalized_root),
+    );
+    let forge_provider = Some(provider.as_storage_str().to_string());
+
     Ok(ResolvedRepositoryInput {
         name,
         normalized_root_path,
         remote,
         remote_url,
         default_branch,
+        forge_provider,
     })
 }
 
@@ -988,4 +1068,55 @@ pub(crate) fn normalize_filesystem_path(path: &Path) -> Option<String> {
     fs::canonicalize(path)
         .ok()
         .map(|canonicalized| canonicalized.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_and_load_repository_round_trips_forge_provider() {
+        let env = crate::testkit::TestEnv::new("repos-forge-provider");
+        let repo = ResolvedRepositoryInput {
+            name: "gitlab-repo".to_string(),
+            normalized_root_path: env.root.join("repo").display().to_string(),
+            remote: Some("origin".to_string()),
+            remote_url: Some("git@gitlab.com:acme/gitlab-repo.git".to_string()),
+            default_branch: "main".to_string(),
+            forge_provider: Some("gitlab".to_string()),
+        };
+
+        let repo_id = insert_repository(&repo).unwrap();
+        let loaded = load_repository_by_id(&repo_id).unwrap().unwrap();
+
+        assert_eq!(loaded.forge_provider.as_deref(), Some("gitlab"));
+        assert_eq!(loaded.remote.as_deref(), Some("origin"));
+    }
+
+    #[test]
+    fn update_repository_forge_provider_persists_cache() {
+        let env = crate::testkit::TestEnv::new("repos-forge-provider-update");
+        let repo = ResolvedRepositoryInput {
+            name: "legacy-repo".to_string(),
+            normalized_root_path: env.root.join("legacy").display().to_string(),
+            remote: Some("origin".to_string()),
+            remote_url: Some("git@github.com:acme/legacy-repo.git".to_string()),
+            default_branch: "main".to_string(),
+            forge_provider: None,
+        };
+
+        let repo_id = insert_repository(&repo).unwrap();
+        assert_eq!(
+            load_repository_by_id(&repo_id)
+                .unwrap()
+                .unwrap()
+                .forge_provider,
+            None
+        );
+
+        update_repository_forge_provider(&repo_id, "github").unwrap();
+
+        let loaded = load_repository_by_id(&repo_id).unwrap().unwrap();
+        assert_eq!(loaded.forge_provider.as_deref(), Some("github"));
+    }
 }

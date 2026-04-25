@@ -13,6 +13,7 @@ import type {
 } from "@/lib/api";
 import { helmorQueryKeys } from "@/lib/query-client";
 import { DEFAULT_SETTINGS, SettingsContext } from "@/lib/settings";
+import { resetSidebarMutationGate } from "@/lib/sidebar-mutation-gate";
 import { useWorkspacesSidebarController } from "./use-controller";
 
 const apiMocks = vi.hoisted(() => {
@@ -40,7 +41,7 @@ const apiMocks = vi.hoisted(() => {
 		pinWorkspace: vi.fn(),
 		prepareArchiveWorkspace: vi.fn(),
 		restoreWorkspace: vi.fn(),
-		setWorkspaceManualStatus: vi.fn(),
+		setWorkspaceStatus: vi.fn(),
 		startArchiveWorkspace: vi.fn(),
 		unpinWorkspace: vi.fn(),
 		validateRestoreWorkspace: vi.fn(),
@@ -92,7 +93,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 		pinWorkspace: apiMocks.pinWorkspace,
 		prepareArchiveWorkspace: apiMocks.prepareArchiveWorkspace,
 		restoreWorkspace: apiMocks.restoreWorkspace,
-		setWorkspaceManualStatus: apiMocks.setWorkspaceManualStatus,
+		setWorkspaceStatus: apiMocks.setWorkspaceStatus,
 		startArchiveWorkspace: apiMocks.startArchiveWorkspace,
 		unpinWorkspace: apiMocks.unpinWorkspace,
 		validateRestoreWorkspace: apiMocks.validateRestoreWorkspace,
@@ -111,8 +112,7 @@ const workspaceGroups: WorkspaceGroup[] = [
 				repoName: "helmor",
 				repoInitials: "HE",
 				state: "ready",
-				manualStatus: null,
-				derivedStatus: "in-progress",
+				status: "in-progress",
 				hasUnread: false,
 				workspaceUnread: 0,
 				unreadSessionCount: 0,
@@ -132,8 +132,7 @@ const workspaceGroups: WorkspaceGroup[] = [
 				repoName: "helmor",
 				repoInitials: "HE",
 				state: "ready",
-				manualStatus: null,
-				derivedStatus: "in-progress",
+				status: "in-progress",
 				hasUnread: false,
 				workspaceUnread: 0,
 				unreadSessionCount: 0,
@@ -162,16 +161,17 @@ function makeArchivedSummary(id: string): WorkspaceSummary {
 		hasUnread: false,
 		workspaceUnread: 0,
 		unreadSessionCount: 0,
-		derivedStatus: "in-progress",
-		manualStatus: null,
+		status: "in-progress",
 		branch: `feature/${id}`,
 		activeSessionId: null,
 		activeSessionTitle: null,
 		activeSessionAgentType: null,
 		activeSessionStatus: null,
 		prTitle: null,
+		pinnedAt: null,
 		sessionCount: 0,
 		messageCount: 0,
+		createdAt: "2024-01-01T00:00:00Z",
 	};
 }
 
@@ -192,8 +192,7 @@ function makeWorkspaceDetail(id: string): WorkspaceDetail {
 		hasUnread: false,
 		workspaceUnread: 0,
 		unreadSessionCount: 0,
-		derivedStatus: "in-progress",
-		manualStatus: null,
+		status: "in-progress",
 		activeSessionId: null,
 		activeSessionTitle: null,
 		activeSessionAgentType: null,
@@ -231,6 +230,7 @@ function createWrapper(queryClient: QueryClient) {
 
 describe("useWorkspacesSidebarController archive flow", () => {
 	beforeEach(() => {
+		resetSidebarMutationGate();
 		vi.clearAllMocks();
 		apiMocks.loadWorkspaceGroups.mockResolvedValue(workspaceGroups);
 		apiMocks.loadArchivedWorkspaces.mockResolvedValue([]);
@@ -260,6 +260,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 			restoredState: "ready",
 			selectedWorkspaceId: "ws-1",
 			branchRename: null,
+			restoredFromTargetBranch: null,
 		});
 	});
 
@@ -420,6 +421,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 				setupFromProject: false,
 				runFromProject: false,
 				archiveFromProject: false,
+				autoRunSetup: true,
 			},
 		});
 		apiMocks.finalizeWorkspaceFromRepo.mockImplementation(
@@ -519,6 +521,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 				setupFromProject: false,
 				runFromProject: false,
 				archiveFromProject: false,
+				autoRunSetup: true,
 			},
 		});
 		// Keep Phase 2 suspended so we can assert the Phase 1 painted state
@@ -599,15 +602,15 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		});
 		expect(
 			queryClient.getQueryData(
-				helmorQueryKeys.workspacePr(generatedWorkspaceId),
+				helmorQueryKeys.workspaceChangeRequest(generatedWorkspaceId),
 			),
 		).toBeNull();
 		expect(
 			queryClient.getQueryData(
-				helmorQueryKeys.workspacePrActionStatus(generatedWorkspaceId),
+				helmorQueryKeys.workspaceForgeActionStatus(generatedWorkspaceId),
 			),
 		).toMatchObject({
-			pr: null,
+			changeRequest: null,
 			remoteState: "noPr",
 			deployments: [],
 			checks: [],
@@ -622,7 +625,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		});
 		const deferred = new Promise<void>(() => {});
 
-		apiMocks.setWorkspaceManualStatus.mockReturnValue(deferred);
+		apiMocks.setWorkspaceStatus.mockReturnValue(deferred);
 
 		const { result } = renderHook(
 			() =>
@@ -642,13 +645,10 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		});
 
 		act(() => {
-			void result.current.handleSetManualStatus("ws-1", "done");
+			void result.current.handleSetWorkspaceStatus("ws-1", "done");
 		});
 
-		expect(apiMocks.setWorkspaceManualStatus).toHaveBeenCalledWith(
-			"ws-1",
-			"done",
-		);
+		expect(apiMocks.setWorkspaceStatus).toHaveBeenCalledWith("ws-1", "done");
 		expect(result.current.groups[0]?.rows.map((row) => row.id)).toEqual([
 			"ws-1",
 			"ws-2",
@@ -697,6 +697,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 				setupFromProject: false,
 				runFromProject: false,
 				archiveFromProject: false,
+				autoRunSetup: true,
 			},
 		});
 		apiMocks.finalizeWorkspaceFromRepo.mockImplementation(
@@ -807,6 +808,7 @@ describe("useWorkspacesSidebarController archive flow", () => {
 				setupFromProject: false,
 				runFromProject: false,
 				archiveFromProject: false,
+				autoRunSetup: true,
 			},
 		});
 		apiMocks.finalizeWorkspaceFromRepo.mockRejectedValue(
@@ -882,12 +884,12 @@ describe("useWorkspacesSidebarController archive flow", () => {
 		).toBeUndefined();
 		expect(
 			queryClient.getQueryData(
-				helmorQueryKeys.workspacePr(generatedWorkspaceId),
+				helmorQueryKeys.workspaceChangeRequest(generatedWorkspaceId),
 			),
 		).toBeUndefined();
 		expect(
 			queryClient.getQueryData(
-				helmorQueryKeys.workspacePrActionStatus(generatedWorkspaceId),
+				helmorQueryKeys.workspaceForgeActionStatus(generatedWorkspaceId),
 			),
 		).toBeUndefined();
 		expect(
