@@ -23,11 +23,11 @@ export type WorkspaceState =
 	| "archived";
 
 /**
- * Mirror of the Rust `DerivedStatus` enum
- * (`src-tauri/src/workspace/derived_status.rs`). Drives the sidebar kanban
+ * Mirror of the Rust `WorkspaceStatus` enum
+ * (`src-tauri/src/workspace/status.rs`). Drives the sidebar kanban
  * lanes and PR-driven auto-status transitions.
  */
-export type DerivedStatus =
+export type WorkspaceStatus =
 	| "in-progress"
 	| "done"
 	| "review"
@@ -62,8 +62,7 @@ export type WorkspaceRow = {
 	hasUnread?: boolean;
 	workspaceUnread?: number;
 	unreadSessionCount?: number;
-	derivedStatus?: DerivedStatus;
-	manualStatus?: DerivedStatus | null;
+	status?: WorkspaceStatus;
 	branch?: string | null;
 	activeSessionId?: string | null;
 	activeSessionTitle?: string | null;
@@ -139,8 +138,7 @@ export type WorkspaceSummary = {
 	hasUnread: boolean;
 	workspaceUnread: number;
 	unreadSessionCount: number;
-	derivedStatus: DerivedStatus;
-	manualStatus?: DerivedStatus | null;
+	status: WorkspaceStatus;
 	branch?: string | null;
 	activeSessionId?: string | null;
 	activeSessionTitle?: string | null;
@@ -330,8 +328,7 @@ export type WorkspaceDetail = {
 	hasUnread: boolean;
 	workspaceUnread: number;
 	unreadSessionCount: number;
-	derivedStatus: DerivedStatus;
-	manualStatus?: DerivedStatus | null;
+	status: WorkspaceStatus;
 	activeSessionId?: string | null;
 	activeSessionTitle?: string | null;
 	activeSessionAgentType?: string | null;
@@ -1338,6 +1335,12 @@ export type PushWorkspaceToRemoteResponse = {
 	headCommit: string;
 };
 
+export type ContinueWorkspaceResponse = {
+	branch: string;
+	targetBranch: string;
+	startPoint: string;
+};
+
 export type ForgeActionItem = {
 	id: string;
 	name: string;
@@ -1357,18 +1360,18 @@ export type ForgeActionStatus = {
 	message?: string | null;
 };
 
-export async function lookupWorkspaceChangeRequest(
+export async function refreshWorkspaceChangeRequest(
 	workspaceId: string,
 ): Promise<ChangeRequestInfo | null> {
 	try {
 		const result = await invoke<ChangeRequestInfo | null>(
-			"lookup_workspace_change_request",
+			"refresh_workspace_change_request",
 			{ workspaceId },
 		);
 		return result ?? null;
 	} catch (error) {
 		throw new Error(
-			describeInvokeError(error, "Unable to look up change request."),
+			describeInvokeError(error, "Unable to refresh change request."),
 		);
 	}
 }
@@ -1477,6 +1480,21 @@ export async function closeWorkspaceChangeRequest(
 	} catch (error) {
 		throw new Error(
 			describeInvokeError(error, "Unable to close change request."),
+		);
+	}
+}
+
+export async function continueWorkspaceFromTargetBranch(
+	workspaceId: string,
+): Promise<ContinueWorkspaceResponse> {
+	try {
+		return await invoke<ContinueWorkspaceResponse>(
+			"continue_workspace_from_target_branch",
+			{ workspaceId },
+		);
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to continue workspace."),
 		);
 	}
 }
@@ -1671,11 +1689,11 @@ export async function unpinWorkspace(workspaceId: string): Promise<void> {
 	return invoke<void>("unpin_workspace", { workspaceId });
 }
 
-export async function setWorkspaceManualStatus(
+export async function setWorkspaceStatus(
 	workspaceId: string,
-	status: DerivedStatus | null,
+	status: WorkspaceStatus,
 ): Promise<void> {
-	return invoke<void>("set_workspace_manual_status", { workspaceId, status });
+	return invoke<void>("set_workspace_status", { workspaceId, status });
 }
 
 // ---------------------------------------------------------------------------
@@ -2043,7 +2061,7 @@ export type ConductorWorkspace = {
 	directoryName: string;
 	state: string;
 	branch: string | null;
-	derivedStatus: string | null;
+	status: string | null;
 	prTitle: string | null;
 	sessionCount: number;
 	messageCount: number;
