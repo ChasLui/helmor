@@ -1,7 +1,7 @@
 import { ArrowRight } from "lucide-react";
 import helmorLogoSrc from "@/assets/helmor-logo.png";
-import helmorScreenshotSrc from "@/assets/helmor-screenshot-dark.png";
 import { Button } from "@/components/ui/button";
+import { HelmorOnboardingMockup } from "../mockup";
 import type { OnboardingStep } from "../types";
 
 export function IntroPreview({
@@ -83,12 +83,7 @@ export function IntroPreview({
 											: "scale-100"
 					}`}
 				>
-					<img
-						src={helmorScreenshotSrc}
-						alt="Helmor workspace preview"
-						draggable={false}
-						className="w-full object-cover"
-					/>
+					<HelmorOnboardingMockup />
 				</div>
 			</section>
 		</div>

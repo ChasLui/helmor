@@ -215,6 +215,11 @@ describe("App GitHub identity states", () => {
 		expect(
 			await screen.findByRole("main", { name: "Helmor onboarding" }),
 		).toBeInTheDocument();
+		expect(
+			screen.getByLabelText("Helmor workspace preview"),
+		).toBeInTheDocument();
+		expect(screen.getByText("Onboarding Flow")).toBeInTheDocument();
+		expect(screen.getByText("Actions")).toBeInTheDocument();
 		expect(apiMocks.loadGithubIdentitySession).not.toHaveBeenCalled();
 		expect(
 			screen.queryByRole("main", { name: "GitHub identity gate" }),
