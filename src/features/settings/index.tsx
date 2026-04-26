@@ -50,6 +50,7 @@ import {
 import type { ThemeMode } from "@/lib/settings";
 import { useSettings } from "@/lib/settings";
 import { clampEffort, findModelOption } from "@/lib/workspace-helpers";
+import { SettingsGroup, SettingsRow } from "./components/settings-row";
 import { AccountPanel } from "./panels/account";
 import { AppUpdatesPanel } from "./panels/app-updates";
 import { CliInstallPanel } from "./panels/cli-install";
@@ -253,75 +254,46 @@ export const SettingsDialog = memo(function SettingsDialog({
 						</div>
 
 						{/* Content area */}
-						<div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-8 py-6">
+						<div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-8 pt-1 pb-6">
 							{activeSection === "general" && (
-								<div className="flex flex-col gap-3">
-									{/* Desktop Notifications */}
-									<div className="flex items-center justify-between rounded-xl border border-border/30 bg-muted/30 px-5 py-4">
-										<div className="mr-8">
-											<div className="text-[13px] font-medium leading-snug text-foreground">
-												Desktop Notifications
-											</div>
-											<div className="mt-1 text-[12px] leading-snug text-muted-foreground">
-												Show system notifications when sessions complete or need
-												input
-											</div>
-										</div>
+								<SettingsGroup>
+									<SettingsRow
+										title="Desktop Notifications"
+										description="Show system notifications when sessions complete or need input"
+									>
 										<Switch
 											checked={settings.notifications}
 											onCheckedChange={(checked) =>
 												updateSettings({ notifications: checked })
 											}
 										/>
-									</div>
-
-									{/* Always show context usage */}
-									<div className="flex items-center justify-between rounded-xl border border-border/30 bg-muted/30 px-5 py-4">
-										<div className="mr-8">
-											<div className="text-[13px] font-medium leading-snug text-foreground">
-												Always show context usage
-											</div>
-											<div className="mt-1 text-[12px] leading-snug text-muted-foreground">
-												Always show context usage. By default, it is only shown
-												when more than 70% is used.
-											</div>
-										</div>
+									</SettingsRow>
+									<SettingsRow
+										title="Always show context usage"
+										description="By default, context usage is only shown when more than 70% is used."
+									>
 										<Switch
 											checked={settings.alwaysShowContextUsage}
 											onCheckedChange={(checked) =>
 												updateSettings({ alwaysShowContextUsage: checked })
 											}
 										/>
-									</div>
-
-									<div className="flex items-center justify-between rounded-xl border border-border/30 bg-muted/30 px-5 py-4">
-										<div className="mr-8">
-											<div className="text-[13px] font-medium leading-snug text-foreground">
-												Usage Stats
-											</div>
-											<div className="mt-1 text-[12px] leading-snug text-muted-foreground">
-												Show account rate limits beside the composer.
-											</div>
-										</div>
+									</SettingsRow>
+									<SettingsRow
+										title="Usage Stats"
+										description="Show account rate limits beside the composer."
+									>
 										<Switch
 											checked={settings.showUsageStats}
 											onCheckedChange={(checked) =>
 												updateSettings({ showUsageStats: checked })
 											}
 										/>
-									</div>
-
-									{/* Follow-up behavior */}
-									<div className="flex items-center justify-between rounded-xl border border-border/30 bg-muted/30 px-5 py-4">
-										<div className="mr-8">
-											<div className="text-[13px] font-medium leading-snug text-foreground">
-												Follow-up behavior
-											</div>
-											<div className="mt-1 text-[12px] leading-snug text-muted-foreground">
-												Queue follow-ups while the agent runs, or steer the
-												current run.
-											</div>
-										</div>
+									</SettingsRow>
+									<SettingsRow
+										title="Follow-up behavior"
+										description="Queue follow-ups while the agent runs, or steer the current run."
+									>
 										<ToggleGroup
 											type="single"
 											value={settings.followUpBehavior}
@@ -347,26 +319,21 @@ export const SettingsDialog = memo(function SettingsDialog({
 												Steer
 											</ToggleGroupItem>
 										</ToggleGroup>
-									</div>
-
+									</SettingsRow>
 									<AppUpdatesPanel />
-								</div>
+								</SettingsGroup>
 							)}
 
 							{activeSection === "appearance" && (
-								<div className="flex flex-col gap-3">
-									{/* Theme */}
-									<div className="rounded-xl border border-border/30 bg-muted/30 px-5 py-4">
-										<div className="text-[13px] font-medium leading-snug text-foreground">
-											Theme
-										</div>
-										<div className="mt-1 text-[12px] leading-snug text-muted-foreground">
-											Switch between light and dark appearance
-										</div>
+								<SettingsGroup>
+									<SettingsRow
+										title="Theme"
+										description="Switch between light and dark appearance"
+									>
 										<ToggleGroup
 											type="single"
 											value={settings.theme}
-											className="mt-3 gap-1.5"
+											className="gap-1.5"
 											onValueChange={(value: string) => {
 												if (value) {
 													updateSettings({ theme: value as ThemeMode });
@@ -390,19 +357,11 @@ export const SettingsDialog = memo(function SettingsDialog({
 												</ToggleGroupItem>
 											))}
 										</ToggleGroup>
-									</div>
-
-									{/* Font Size */}
-									<div className="flex items-center justify-between rounded-xl border border-border/30 bg-muted/30 px-5 py-4">
-										<div className="mr-8">
-											<div className="text-[13px] font-medium leading-snug text-foreground">
-												Font Size
-											</div>
-											<div className="mt-1 text-[12px] leading-snug text-muted-foreground">
-												Adjust the text size for chat messages
-											</div>
-										</div>
-
+									</SettingsRow>
+									<SettingsRow
+										title="Font Size"
+										description="Adjust the text size for chat messages"
+									>
 										<div className="flex items-center gap-3">
 											<Button
 												variant="outline"
@@ -419,11 +378,9 @@ export const SettingsDialog = memo(function SettingsDialog({
 											>
 												<Minus className="size-3.5" strokeWidth={2} />
 											</Button>
-
 											<span className="w-12 text-center text-[14px] font-semibold tabular-nums text-foreground">
 												{settings.fontSize}px
 											</span>
-
 											<Button
 												variant="outline"
 												size="icon-sm"
@@ -440,22 +397,16 @@ export const SettingsDialog = memo(function SettingsDialog({
 												<Plus className="size-3.5" strokeWidth={2} />
 											</Button>
 										</div>
-									</div>
-								</div>
+									</SettingsRow>
+								</SettingsGroup>
 							)}
 
 							{activeSection === "model" && (
-								<div className="flex flex-col gap-3">
-									{/* Default Model */}
-									<div className="flex items-center justify-between rounded-xl border border-border/30 bg-muted/30 px-5 py-4">
-										<div className="mr-8">
-											<div className="text-[13px] font-medium leading-snug text-foreground">
-												Default model
-											</div>
-											<div className="mt-1 text-[12px] leading-snug text-muted-foreground">
-												Model for new chats
-											</div>
-										</div>
+								<SettingsGroup>
+									<SettingsRow
+										title="Default model"
+										description="Model for new chats"
+									>
 										<div className="flex items-center gap-2">
 											<DropdownMenu>
 												<DropdownMenuTrigger className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-border/50 bg-muted/30 px-3 py-1.5 text-[13px] text-foreground hover:bg-muted/50">
@@ -526,13 +477,13 @@ export const SettingsDialog = memo(function SettingsDialog({
 												/>
 											</div>
 										</div>
-									</div>
-								</div>
+									</SettingsRow>
+								</SettingsGroup>
 							)}
 
 							{activeSection === "git" && (
-								<div className="flex flex-col gap-3">
-									<div className="rounded-xl border border-border/30 bg-muted/30 px-5 py-4">
+								<SettingsGroup>
+									<div className="py-5">
 										<div className="text-[13px] font-medium leading-snug text-foreground">
 											Branch Prefix
 										</div>
@@ -579,7 +530,7 @@ export const SettingsDialog = memo(function SettingsDialog({
 											<RadioOption value="none" label="None" />
 										</RadioGroup>
 									</div>
-								</div>
+								</SettingsGroup>
 							)}
 
 							{activeSection === "experimental" && (

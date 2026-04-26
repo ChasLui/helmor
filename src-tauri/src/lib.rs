@@ -129,9 +129,6 @@ pub fn run() {
             // can find developer tools without manual PATH hacks.
             shell_env::inherit_login_shell_env();
 
-            // Resolve bundled gh / glab paths once; forge CLI calls and the
-            // AppleScript terminal helper read from this cache so behavior
-            // doesn't depend on the user's PATH.
             forge::init_bundled_cli_paths();
 
             updater::configure()?;

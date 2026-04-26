@@ -1,20 +1,5 @@
-/**
- * Stage Claude Code + Codex + gh + glab binaries into `sidecar/dist/vendor/`
- * so Tauri can bundle them as `bundle.resources` and ship them inside the
- * `.app` payload — no reliance on system-wide installs.
- *
- * Layout produced (macOS host only):
- *
- *   dist/vendor/
- *     claude-code/cli.js + vendor/<host-arch>/...
- *     codex/codex
- *     bun/bun
- *     gh/gh
- *     glab/glab
- *
- * gh / glab are pinned and downloaded from upstream releases on cache miss.
- * Cache lives at `sidecar/.bundle-cache/`.
- */
+// Stage claude-code + codex + bun + gh + glab into `sidecar/dist/vendor/`
+// for Tauri to ship as bundle resources. macOS host only.
 
 import { execFileSync, execSync } from "node:child_process";
 import {
@@ -35,22 +20,19 @@ const NODE_MODULES = join(SIDECAR_ROOT, "node_modules");
 const DIST_VENDOR = join(SIDECAR_ROOT, "dist", "vendor");
 const BUNDLE_CACHE = join(SIDECAR_ROOT, ".bundle-cache");
 
-// Pin upstream forge CLI versions + SHA256 checksums. To upgrade:
-//   1. Bump GH_VERSION / GLAB_VERSION.
-//   2. Pull the new checksums from upstream and update the maps below.
-//      - gh:   curl -sfL https://github.com/cli/cli/releases/download/v$VER/gh_${VER}_checksums.txt
-//      - glab: curl -sfL https://gitlab.com/gitlab-org/cli/-/releases/v$VER/downloads/checksums.txt
-//   3. Wipe sidecar/.bundle-cache to force re-download.
-const GH_VERSION = "2.65.0";
+// Bumping: update version + sha256, wipe sidecar/.bundle-cache. Checksums:
+//   gh:   github.com/cli/cli/releases/download/v$VER/gh_${VER}_checksums.txt
+//   glab: gitlab.com/gitlab-org/cli/-/releases/v$VER/downloads/checksums.txt
+const GH_VERSION = "2.91.0";
 const GH_SHA256 = {
-	arm64: "5acb7110fa6f18d2e1a7bea41526bb8532584f4a10067b40217488bf9f3ad9ab",
-	amd64: "0d33a2b5263304e9110051e3ec6b710b26f37cb10170031c1a79a81d2d9a871b",
+	arm64: "20446cd714d9fa1b69fbd410deade3731f38fe09a2b980c8488aa388dd320ada",
+	amd64: "8806784f93603fe6d3f95c3583a08df38f175df9ebc123dc8b15f919329980e2",
 } as const;
 
-const GLAB_VERSION = "1.50.0";
+const GLAB_VERSION = "1.93.0";
 const GLAB_SHA256 = {
-	arm64: "271502866ffe333d8ac84e941edbc8bc346def5c012245867c1602bfac826aea",
-	amd64: "42e403c274d605fe5bfc606f18d6dd498ad741c6b5d2e6e79a557c384b176f5d",
+	arm64: "6d6ffa97d430b5e7ff912e64dbac14703acc57967df654be1950ae71858d5b6f",
+	amd64: "79d1a4f933919689c5fb7774feb1dd08f30b9c896dff4283b4a7387689ee0531",
 } as const;
 
 // ---------------------------------------------------------------------------

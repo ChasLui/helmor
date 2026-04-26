@@ -1,9 +1,4 @@
-//! Forge CLI status plumbing.
-//!
-//! Probes the bundled `gh` / `glab` to tell the UI whether each CLI is
-//! Ready / Unauthenticated / Error, and the AppleScript-driven Connect
-//! flow that opens a terminal pre-filled with `gh auth login` /
-//! `glab auth login`.
+//! `gh` / `glab` status probing + Connect terminal flow.
 
 use anyhow::{bail, Context, Result};
 use std::time::Duration;
@@ -45,9 +40,7 @@ pub fn open_forge_cli_auth_terminal(provider: ForgeProvider, host: Option<&str>)
     open_terminal_with_command(&command)
 }
 
-/// For the AppleScript terminal: emit the absolute bundled path (quoted) so
-/// the user runs Helmor's bundled CLI, not a system one. Falls back to the
-/// bare program name in dev / when no bundle is available.
+/// Absolute bundled path (shell-quoted) when available, otherwise the bare name.
 fn bundled_program_token(program: &str) -> String {
     match bundled::bundled_path_for(program) {
         Some(path) => shell_single_quote(&path.display().to_string()),
@@ -55,10 +48,7 @@ fn bundled_program_token(program: &str) -> String {
     }
 }
 
-/// Wrap a value in single quotes safe for /bin/sh, handling embedded
-/// single quotes by closing-quote / escaped-quote / re-opening-quote
-/// (the standard `'foo'\''bar'` trick). Required because user paths can
-/// legitimately contain `'` (e.g. `/Applications/Tom's Stuff/Helmor.app`).
+/// `'foo'\''bar'`-style single quoting safe for /bin/sh.
 fn shell_single_quote(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('\'');
@@ -292,13 +282,29 @@ fn parse_glab_version(stdout: &str) -> String {
         .to_string()
 }
 
+/// `glab auth status` decorates each detail line with leading whitespace
+/// and a status glyph (`✓`, `✗`, `*`, etc.) before the human prose. Strip
+/// the decoration, locate `Logged in to <host> as <user>`, and stop at the
+/// first separator after the username so trailing config paths or punctuation
+/// don't leak into the parsed login.
 fn parse_glab_login(text: &str) -> Option<String> {
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("Logged in to ") {
-            if let Some((_, login)) = rest.rsplit_once(" as ") {
-                return Some(login.trim().trim_end_matches('.').to_string());
-            }
+    for raw in text.lines() {
+        let body = raw.trim_start_matches(|c: char| {
+            c.is_whitespace() || c == '✓' || c == '✗' || c == '*' || c == '-' || c == '•'
+        });
+        let Some(after_to) = body.strip_prefix("Logged in to ") else {
+            continue;
+        };
+        let Some((_, after_as)) = after_to.split_once(" as ") else {
+            continue;
+        };
+        let login = after_as
+            .split(|c: char| c.is_whitespace() || c == '(' || c == ')')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(['.', ',', ';', ':']);
+        if !login.is_empty() {
+            return Some(login.to_string());
         }
     }
     None
@@ -343,5 +349,45 @@ mod tests {
             "'/Apps/Tom'\\''s Stuff/Helmor.app/Contents/Resources/vendor/gh/gh'"
         );
         assert_eq!(shell_single_quote("a'b'c"), "'a'\\''b'\\''c'");
+    }
+
+    #[test]
+    fn parse_glab_login_extracts_username_from_decorated_line() {
+        let stderr = concat!(
+            "ngit.hundun.cn\n",
+            "  ✓ Logged in to ngit.hundun.cn as liangeqiang (/Users/liangeqiang/.config/glab-cli/config.yml)\n",
+            "  ✓ Git operations for ngit.hundun.cn configured to use https protocol.\n",
+            "  ✓ Token found: ********\n",
+        );
+        assert_eq!(parse_glab_login(stderr), Some("liangeqiang".to_string()),);
+    }
+
+    #[test]
+    fn parse_glab_login_handles_plain_legacy_format() {
+        assert_eq!(
+            parse_glab_login("Logged in to gitlab.com as octo"),
+            Some("octo".to_string()),
+        );
+        assert_eq!(
+            parse_glab_login("Logged in to gitlab.com as octo."),
+            Some("octo".to_string()),
+        );
+    }
+
+    #[test]
+    fn parse_glab_login_returns_none_when_no_match() {
+        assert_eq!(parse_glab_login(""), None);
+        assert_eq!(parse_glab_login("✗ Not logged in"), None);
+        assert_eq!(parse_glab_login("Some unrelated diagnostic output"), None);
+    }
+
+    #[test]
+    fn parse_glab_login_skips_unrelated_lines_until_match() {
+        let stderr = concat!(
+            "Warning: Multiple config files found.\n",
+            "  ✗ Some other check\n",
+            "  ✓ Logged in to gitlab.example.com as ada-lovelace (/path/to/config)\n",
+        );
+        assert_eq!(parse_glab_login(stderr), Some("ada-lovelace".to_string()),);
     }
 }

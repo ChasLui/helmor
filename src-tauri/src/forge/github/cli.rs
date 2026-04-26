@@ -114,6 +114,7 @@ pub fn list_github_accessible_repositories() -> Result<Vec<GithubRepositorySumma
 }
 
 fn get_github_cli_status_with(runner: &impl GhCommandRunner) -> Result<GithubCliStatus> {
+    tracing::debug!("Checking GitHub CLI status");
     let version = match runner.run(["--version"]) {
         Ok(output) => Some(parse_gh_version(&output.stdout)),
         Err(GhCommandError::NotFound) => {
@@ -189,8 +190,14 @@ fn get_github_cli_status_with(runner: &impl GhCommandRunner) -> Result<GithubCli
         }
     };
 
-    let parsed = serde_json::from_str::<GhAuthStatusResponse>(&auth_output.stdout)
-        .context("Failed to decode GitHub CLI auth status")?;
+    let parsed =
+        serde_json::from_str::<GhAuthStatusResponse>(&auth_output.stdout).map_err(|err| {
+            tracing::error!(
+                stdout = %auth_output.stdout,
+                "Failed to decode `gh auth status --json hosts` output"
+            );
+            anyhow!("Failed to decode GitHub CLI auth status: {err}")
+        })?;
     let host_entry = parsed
         .hosts
         .get(GITHUB_HOST)
@@ -443,11 +450,10 @@ fn stabilize_loaded_status(
     loaded
 }
 
+/// Only `Error` is genuinely flap-prone; `Unauthenticated` is filesystem-
+/// deterministic from `hosts.yml` and should surface immediately.
 fn should_debounce_ready_downgrade(status: &GithubCliStatus) -> bool {
-    matches!(
-        status,
-        GithubCliStatus::Unauthenticated { .. } | GithubCliStatus::Error { .. }
-    )
+    matches!(status, GithubCliStatus::Error { .. })
 }
 
 fn downgrade_observed_at(
@@ -843,7 +849,34 @@ mod tests {
     }
 
     #[test]
-    fn load_cached_status_debounces_ready_downgrade() {
+    fn load_cached_status_debounces_ready_to_error_downgrade() {
+        let cache = Mutex::new(Some(CachedGithubCliStatus {
+            cached_at: Instant::now() - Duration::from_secs(10),
+            status: GithubCliStatus::Ready {
+                host: "github.com".to_string(),
+                login: "octo".to_string(),
+                version: "gh version 2.0.0".to_string(),
+                message: "GitHub CLI ready as octo.".to_string(),
+            },
+            downgrade_observed_at: None,
+        }));
+
+        let loaded = load_cached_status(&cache, Duration::from_secs(1), || {
+            Ok(GithubCliStatus::Error {
+                host: "github.com".to_string(),
+                version: Some("gh version 2.0.0".to_string()),
+                message: "GitHub CLI auth check failed: connection reset".to_string(),
+            })
+        })
+        .unwrap();
+
+        assert!(matches!(loaded, GithubCliStatus::Ready { .. }));
+        let cached = cache.lock().unwrap();
+        assert!(cached.as_ref().unwrap().downgrade_observed_at.is_some());
+    }
+
+    #[test]
+    fn load_cached_status_accepts_unauthenticated_immediately() {
         let cache = Mutex::new(Some(CachedGithubCliStatus {
             cached_at: Instant::now() - Duration::from_secs(10),
             status: GithubCliStatus::Ready {
@@ -864,9 +897,9 @@ mod tests {
         })
         .unwrap();
 
-        assert!(matches!(loaded, GithubCliStatus::Ready { .. }));
+        assert!(matches!(loaded, GithubCliStatus::Unauthenticated { .. }));
         let cached = cache.lock().unwrap();
-        assert!(cached.as_ref().unwrap().downgrade_observed_at.is_some());
+        assert!(cached.as_ref().unwrap().downgrade_observed_at.is_none());
     }
 
     #[test]
@@ -896,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn load_cached_status_accepts_persistent_ready_downgrade() {
+    fn load_cached_status_accepts_persistent_error_downgrade() {
         let cache = Mutex::new(Some(CachedGithubCliStatus {
             cached_at: Instant::now() - Duration::from_secs(10),
             status: GithubCliStatus::Ready {
@@ -911,15 +944,15 @@ mod tests {
         }));
 
         let loaded = load_cached_status(&cache, Duration::from_secs(1), || {
-            Ok(GithubCliStatus::Unauthenticated {
+            Ok(GithubCliStatus::Error {
                 host: "github.com".to_string(),
                 version: Some("gh version 2.0.0".to_string()),
-                message: "Run `gh auth login` to connect GitHub CLI.".to_string(),
+                message: "GitHub CLI auth check failed: connection reset".to_string(),
             })
         })
         .unwrap();
 
-        assert!(matches!(loaded, GithubCliStatus::Unauthenticated { .. }));
+        assert!(matches!(loaded, GithubCliStatus::Error { .. }));
         let cached = cache.lock().unwrap();
         assert!(cached.as_ref().unwrap().downgrade_observed_at.is_some());
     }

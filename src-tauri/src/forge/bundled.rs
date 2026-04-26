@@ -1,10 +1,4 @@
-//! Resolves paths to bundled forge CLIs (`gh`, `glab`) shipped inside the
-//! `.app` bundle's `Resources/vendor/` tree.
-//!
-//! Paths are resolved once at app startup (`init`) and cached in a
-//! `OnceLock`, so subsequent lookups never touch the filesystem and never
-//! mutate `std::env`. Tests / dev can still override via the
-//! `HELMOR_GH_BIN_PATH` / `HELMOR_GLAB_BIN_PATH` env vars.
+//! Paths to bundled `gh` / `glab` inside `Resources/vendor/`.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -20,9 +14,7 @@ pub struct BundledForgeCliPaths {
 
 static BUNDLED_PATHS: OnceLock<BundledForgeCliPaths> = OnceLock::new();
 
-/// Resolve bundled paths from the running executable's location and stash
-/// them in the global `OnceLock`. Idempotent — safe to call from the Tauri
-/// setup hook. Subsequent calls are a no-op.
+/// Idempotent; call once from the Tauri setup hook.
 pub fn init() {
     let _ = BUNDLED_PATHS.set(resolve_from_running_exe());
     let paths = BUNDLED_PATHS.get();
@@ -33,12 +25,7 @@ pub fn init() {
     );
 }
 
-/// Returns the absolute bundled path for a forge CLI program name, if one
-/// is available. Order:
-///   1. Explicit env var override (`HELMOR_GH_BIN_PATH` / `HELMOR_GLAB_BIN_PATH`)
-///      — used by tests and ad-hoc dev builds.
-///   2. The path resolved at startup by `init`.
-///   3. `None` (caller falls back to PATH).
+/// Env var override > startup-resolved path > `None` (caller falls back to PATH).
 pub fn bundled_path_for(program: &str) -> Option<PathBuf> {
     if let Some(env_key) = env_key_for(program) {
         if let Ok(raw) = std::env::var(env_key) {

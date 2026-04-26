@@ -27,9 +27,7 @@ where
     run_command_with_timeout(program, args, DEFAULT_COMMAND_TIMEOUT)
 }
 
-/// Resolve the actual program path, preferring Helmor's bundled `gh` /
-/// `glab` over whatever is on PATH so behavior is identical regardless of
-/// the user's shell environment.
+/// Prefer the bundled binary over whatever is on PATH.
 fn resolve_program(program: &str) -> PathBuf {
     bundled::bundled_path_for(program).unwrap_or_else(|| PathBuf::from(program))
 }
@@ -53,7 +51,13 @@ where
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // Force monochrome output so JSON parsing isn't broken by ANSI
+        // colour codes when the user's environment sets CLICOLOR_FORCE=1
+        // or similar.
+        .env("NO_COLOR", "1")
+        .env_remove("CLICOLOR_FORCE")
+        .env_remove("FORCE_COLOR");
 
     #[cfg(unix)]
     {

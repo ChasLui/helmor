@@ -8,9 +8,12 @@ import {
 	type DetectedEditor,
 	detectInstalledEditors,
 	type ForgeActionStatus,
+	type ForgeCliStatus,
 	type ForgeDetection,
+	type ForgeProvider,
 	getClaudeRateLimits,
 	getCodexRateLimits,
+	getForgeCliStatus,
 	getLiveContextUsage,
 	getSessionContextUsage,
 	getWorkspaceForge,
@@ -75,6 +78,8 @@ export const helmorQueryKeys = {
 		["workspaceChangeRequest", workspaceId] as const,
 	workspaceForge: (workspaceId: string) =>
 		["workspaceForge", workspaceId] as const,
+	forgeCliStatus: (provider: ForgeProvider, host: string) =>
+		["forgeCliStatus", provider, host] as const,
 	workspaceGitActionStatus: (workspaceId: string) =>
 		["workspaceGitActionStatus", workspaceId] as const,
 	workspaceForgeActionStatus: (workspaceId: string) =>
@@ -202,6 +207,19 @@ export function workspaceForgeQueryOptions(workspaceId: string) {
 		staleTime: 30_000,
 		refetchOnWindowFocus: "always",
 		refetchInterval: (query) => workspaceForgeRefetchInterval(query.state.data),
+	});
+}
+
+export function forgeCliStatusQueryOptions(
+	provider: ForgeProvider,
+	host: string,
+) {
+	return queryOptions<ForgeCliStatus>({
+		queryKey: helmorQueryKeys.forgeCliStatus(provider, host),
+		queryFn: () => getForgeCliStatus(provider, host),
+		staleTime: 30_000,
+		refetchOnWindowFocus: "always",
+		refetchInterval: 60_000,
 	});
 }
 
