@@ -129,6 +129,11 @@ pub fn run() {
             // can find developer tools without manual PATH hacks.
             shell_env::inherit_login_shell_env();
 
+            // Expose bundled gh / glab paths via env vars so forge CLI calls
+            // and the AppleScript-driven terminal use Helmor's bundled
+            // binaries, not whatever the user has on PATH.
+            forge::install_bundled_env();
+
             updater::configure()?;
             updater::spawn_startup_check(app.handle().clone());
             updater::spawn_interval_worker(app.handle().clone());

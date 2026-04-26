@@ -1,10 +1,13 @@
 //! Bounded subprocess execution for forge CLI integrations.
 
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+
+use super::bundled;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CommandOutput {
@@ -24,6 +27,13 @@ where
     run_command_with_timeout(program, args, DEFAULT_COMMAND_TIMEOUT)
 }
 
+/// Resolve the actual program path, preferring Helmor's bundled `gh` /
+/// `glab` over whatever is on PATH so behavior is identical regardless of
+/// the user's shell environment.
+fn resolve_program(program: &str) -> PathBuf {
+    bundled::bundled_path_for(program).unwrap_or_else(|| PathBuf::from(program))
+}
+
 pub(crate) fn run_command_with_timeout<I, S>(
     program: &str,
     args: I,
@@ -37,7 +47,8 @@ where
         .into_iter()
         .map(|arg| arg.as_ref().to_os_string())
         .collect();
-    let mut command = Command::new(program);
+    let resolved = resolve_program(program);
+    let mut command = Command::new(&resolved);
     command
         .args(&args)
         .stdin(Stdio::null())

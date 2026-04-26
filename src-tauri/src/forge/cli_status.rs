@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use crate::github_cli;
 
+use super::bundled;
 use super::command::{command_detail, run_command, run_command_with_timeout};
 use super::types::{ForgeCliStatus, ForgeLabels, ForgeProvider};
 
-const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const OPEN_TERMINAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn get_forge_cli_status(provider: ForgeProvider, host: Option<&str>) -> Result<ForgeCliStatus> {
@@ -29,24 +29,36 @@ pub fn get_forge_cli_status(provider: ForgeProvider, host: Option<&str>) -> Resu
     }
 }
 
+/// `gh` and `glab` ship inside the app bundle. There is nothing to install
+/// at runtime — Helmor refreshes the status instead so the UI can reflect
+/// any auth completed since the last probe.
 pub fn install_forge_cli(provider: ForgeProvider) -> Result<ForgeCliStatus> {
-    match provider {
-        ForgeProvider::Gitlab => install_glab(),
-        ForgeProvider::Github => install_gh(),
-        ForgeProvider::Unknown => bail!("Unknown forge provider."),
-    }
+    get_forge_cli_status(provider, None)
 }
 
 pub fn open_forge_cli_auth_terminal(provider: ForgeProvider, host: Option<&str>) -> Result<()> {
     let command = match provider {
-        ForgeProvider::Github => "gh auth login".to_string(),
+        ForgeProvider::Github => format!("{} auth login", bundled_program_token("gh")),
         ForgeProvider::Gitlab => {
             let host = host.unwrap_or("gitlab.com");
-            format!("glab auth login --hostname {host}")
+            format!(
+                "{} auth login --hostname {host}",
+                bundled_program_token("glab")
+            )
         }
         ForgeProvider::Unknown => bail!("Unknown forge provider."),
     };
     open_terminal_with_command(&command)
+}
+
+/// For the AppleScript terminal: emit the absolute bundled path (quoted) so
+/// the user runs Helmor's bundled CLI, not a system one. Falls back to the
+/// bare program name in dev / when no bundle is available.
+fn bundled_program_token(program: &str) -> String {
+    match bundled::bundled_path_for(program) {
+        Some(path) => format!("'{}'", path.display()),
+        None => program.to_string(),
+    }
 }
 
 pub(crate) fn labels_for(provider: ForgeProvider) -> ForgeLabels {
@@ -82,10 +94,6 @@ pub(crate) fn github_status() -> Result<ForgeCliStatus> {
     github_status_from(github_cli::get_github_cli_status()?)
 }
 
-fn refresh_github_status() -> Result<ForgeCliStatus> {
-    github_status_from(github_cli::refresh_github_cli_status()?)
-}
-
 fn github_status_from(status: github_cli::GithubCliStatus) -> Result<ForgeCliStatus> {
     Ok(match status {
         github_cli::GithubCliStatus::Ready {
@@ -113,12 +121,14 @@ fn github_status_from(status: github_cli::GithubCliStatus) -> Result<ForgeCliSta
             message,
             login_command: "gh auth login".to_string(),
         },
-        github_cli::GithubCliStatus::Unavailable { host, message } => ForgeCliStatus::Missing {
+        github_cli::GithubCliStatus::Unavailable { host, message } => ForgeCliStatus::Error {
             provider: ForgeProvider::Github,
             host,
             cli_name: "gh".to_string(),
-            message,
-            install_command: Some("brew install gh".to_string()),
+            version: None,
+            message: format!(
+                "Bundled GitHub CLI was not found. Reinstall Helmor to recover. ({message})"
+            ),
         },
         github_cli::GithubCliStatus::Error {
             host,
@@ -134,30 +144,19 @@ fn github_status_from(status: github_cli::GithubCliStatus) -> Result<ForgeCliSta
     })
 }
 
-fn install_gh() -> Result<ForgeCliStatus> {
-    run_command("brew", ["--version"]).context(
-        "Homebrew is required to install gh automatically. Install gh manually with `brew install gh`.",
-    )?;
-    let output = run_command_with_timeout("brew", ["install", "gh"], INSTALL_TIMEOUT)
-        .context("Failed to run `brew install gh`")?;
-    if !output.success {
-        bail!("Failed to install gh: {}", command_detail(&output));
-    }
-    refresh_github_status()
-}
-
 pub(crate) fn gitlab_status(host: &str) -> Result<ForgeCliStatus> {
     tracing::debug!(host, "Checking GitLab CLI status");
     let version = match run_command("glab", ["--version"]) {
         Ok(output) => Some(parse_glab_version(&output.stdout)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            tracing::warn!(host, "GitLab CLI is missing");
-            return Ok(ForgeCliStatus::Missing {
+            tracing::warn!(host, "Bundled GitLab CLI not found");
+            return Ok(ForgeCliStatus::Error {
                 provider: ForgeProvider::Gitlab,
                 host: host.to_string(),
                 cli_name: "glab".to_string(),
-                message: "GitLab CLI is not installed on this machine.".to_string(),
-                install_command: Some("brew install glab".to_string()),
+                version: None,
+                message: "Bundled GitLab CLI was not found. Reinstall Helmor to recover."
+                    .to_string(),
             });
         }
         Err(error) => {
@@ -223,16 +222,6 @@ pub(crate) fn gitlab_status(host: &str) -> Result<ForgeCliStatus> {
             })
         }
     }
-}
-
-fn install_glab() -> Result<ForgeCliStatus> {
-    run_command("brew", ["--version"]).context("Homebrew is required to install glab automatically. Install glab manually with `brew install glab`.")?;
-    let output = run_command_with_timeout("brew", ["install", "glab"], INSTALL_TIMEOUT)
-        .context("Failed to run `brew install glab`")?;
-    if !output.success {
-        bail!("Failed to install glab: {}", command_detail(&output));
-    }
-    gitlab_status("gitlab.com")
 }
 
 #[cfg(target_os = "macos")]

@@ -20,6 +20,7 @@
 //!   to change.
 //! - [`gitlab`] — GitLab REST client using `glab api`.
 
+mod bundled;
 mod cli_status;
 mod command;
 mod detect;
@@ -30,6 +31,7 @@ mod remote;
 mod types;
 mod workspace;
 
+pub use bundled::install_bundled_env;
 pub use cli_status::{get_forge_cli_status, install_forge_cli, open_forge_cli_auth_terminal};
 pub use detect::detect_provider_for_repo;
 pub(crate) use detect::detect_provider_for_repo_offline;

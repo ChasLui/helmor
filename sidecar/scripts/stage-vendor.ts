@@ -1,31 +1,19 @@
 /**
- * Stage Claude Code + Codex CLI binaries into `sidecar/dist/vendor/` so
- * Tauri can bundle them as `bundle.resources` and ship them inside the
- * `.app` payload — no reliance on system-wide `claude` / `codex` installs.
+ * Stage Claude Code + Codex + gh + glab binaries into `sidecar/dist/vendor/`
+ * so Tauri can bundle them as `bundle.resources` and ship them inside the
+ * `.app` payload — no reliance on system-wide installs.
  *
  * Layout produced (macOS host only):
  *
  *   dist/vendor/
- *     claude-code/
- *       cli.js
- *       vendor/ripgrep/<arch>-darwin/rg
- *       vendor/audio-capture/<arch>-darwin/audio-capture.node
- *     codex/
- *       codex
- *     bun/
- *       bun
+ *     claude-code/cli.js + vendor/<host-arch>/...
+ *     codex/codex
+ *     bun/bun
+ *     gh/gh
+ *     glab/glab
  *
- * Invariants:
- *   - `cli.js` needs `vendor/` adjacent (Claude Code resolves its own
- *     ripgrep via `path.join(dirname(cli.js), "vendor", "ripgrep", ...)`).
- *   - Only the host-arch subdirs are copied.
- *   - Re-runnable — wipes `dist/vendor/` before copying.
- *
- * Why bundle bun: the Claude Agent SDK spawns `cli.js` through a JS
- * interpreter (bun/node) resolved off PATH. A Finder-launched `.app`
- * inherits a minimal PATH (`/usr/bin:/bin:/usr/sbin:/sbin`) that contains
- * neither, so we ship the host's bun and point the SDK's `executable`
- * option at an absolute path inside `Contents/Resources/vendor/bun/`.
+ * gh / glab are pinned and downloaded from upstream releases on cache miss.
+ * Cache lives at `sidecar/.bundle-cache/`.
  */
 
 import { execFileSync, execSync } from "node:child_process";
@@ -45,6 +33,11 @@ import { fileURLToPath } from "node:url";
 const SIDECAR_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const NODE_MODULES = join(SIDECAR_ROOT, "node_modules");
 const DIST_VENDOR = join(SIDECAR_ROOT, "dist", "vendor");
+const BUNDLE_CACHE = join(SIDECAR_ROOT, ".bundle-cache");
+
+// Pin upstream forge CLI versions. Bump these to upgrade.
+const GH_VERSION = "2.65.0";
+const GLAB_VERSION = "1.50.0";
 
 // ---------------------------------------------------------------------------
 // Platform detection — macOS only, arch varies (arm64 / x64)
@@ -59,6 +52,10 @@ interface TargetInfo {
 	codexPkg: string;
 	/** Target triple used as the subdir inside the codex platform package. */
 	codexTriple: string;
+	/** `gh` release uses `arm64` / `amd64`. */
+	ghArch: "arm64" | "amd64";
+	/** `glab` release uses `arm64` / `amd64`. */
+	glabArch: "arm64" | "amd64";
 }
 
 function detectTarget(): TargetInfo {
@@ -75,12 +72,16 @@ function detectTarget(): TargetInfo {
 				ccVendorArch: "arm64-darwin",
 				codexPkg: "@openai/codex-darwin-arm64",
 				codexTriple: "aarch64-apple-darwin",
+				ghArch: "arm64",
+				glabArch: "arm64",
 			};
 		case "x64":
 			return {
 				ccVendorArch: "x64-darwin",
 				codexPkg: "@openai/codex-darwin-x64",
 				codexTriple: "x86_64-apple-darwin",
+				ghArch: "amd64",
+				glabArch: "amd64",
 			};
 		default:
 			throw new Error(`[stage-vendor] Unsupported macOS arch: ${arch}`);
@@ -137,6 +138,81 @@ const ENTITLEMENTS_PLIST = join(
 	"src-tauri",
 	"Entitlements.plist",
 );
+
+// ---------------------------------------------------------------------------
+// Forge CLI download (gh / glab) — pinned, cached at sidecar/.bundle-cache/
+// ---------------------------------------------------------------------------
+
+function ensureCacheDir(): void {
+	mkdirSync(BUNDLE_CACHE, { recursive: true });
+}
+
+function downloadIfMissing(url: string, dest: string): void {
+	if (existsSync(dest)) return;
+	console.log(`[stage-vendor] downloading ${url}`);
+	mkdirSync(dirname(dest), { recursive: true });
+	execFileSync("curl", ["-fL", "--retry", "3", "-o", dest, url], {
+		stdio: "inherit",
+	});
+}
+
+function stageGhBinary(arch: "arm64" | "amd64"): string {
+	ensureCacheDir();
+	const slug = `gh_${GH_VERSION}_macOS_${arch}`;
+	const archive = join(BUNDLE_CACHE, `${slug}.zip`);
+	const url = `https://github.com/cli/cli/releases/download/v${GH_VERSION}/${slug}.zip`;
+	downloadIfMissing(url, archive);
+
+	const extractDir = join(BUNDLE_CACHE, slug);
+	if (!existsSync(extractDir)) {
+		execFileSync("unzip", ["-q", "-o", archive, "-d", BUNDLE_CACHE], {
+			stdio: "inherit",
+		});
+	}
+
+	const binSrc = join(extractDir, "bin", "gh");
+	if (!existsSync(binSrc)) {
+		throw new Error(
+			`[stage-vendor] gh binary missing after extract: ${binSrc}`,
+		);
+	}
+	const binDest = join(DIST_VENDOR, "gh", "gh");
+	copyFile(binSrc, binDest);
+	chmodSync(binDest, 0o755);
+	maybeSignMacBinary(binDest, false);
+	return binDest;
+}
+
+function stageGlabBinary(arch: "arm64" | "amd64"): string {
+	ensureCacheDir();
+	const archive = join(
+		BUNDLE_CACHE,
+		`glab_${GLAB_VERSION}_macOS_${arch}.tar.gz`,
+	);
+	// glab darwin tarball name uses macOS_{arch}
+	const url = `https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_macOS_${arch}.tar.gz`;
+	downloadIfMissing(url, archive);
+
+	const extractDir = join(BUNDLE_CACHE, `glab_${GLAB_VERSION}_macOS_${arch}`);
+	if (!existsSync(extractDir)) {
+		mkdirSync(extractDir, { recursive: true });
+		execFileSync("tar", ["-xzf", archive, "-C", extractDir], {
+			stdio: "inherit",
+		});
+	}
+
+	const binSrc = join(extractDir, "bin", "glab");
+	if (!existsSync(binSrc)) {
+		throw new Error(
+			`[stage-vendor] glab binary missing after extract: ${binSrc}`,
+		);
+	}
+	const binDest = join(DIST_VENDOR, "glab", "glab");
+	copyFile(binSrc, binDest);
+	chmodSync(binDest, 0o755);
+	maybeSignMacBinary(binDest, false);
+	return binDest;
+}
 
 function maybeSignMacBinary(path: string, withEntitlements: boolean): void {
 	const identity = process.env.APPLE_SIGNING_IDENTITY?.trim();
@@ -252,8 +328,14 @@ for (const rel of [
 	}
 }
 
+// ----- gh + glab (forge CLIs) -----
+stageGhBinary(target.ghArch);
+stageGlabBinary(target.glabArch);
+
 // ----- Summary -----
 console.log(`[stage-vendor] ✓ staged → ${DIST_VENDOR}`);
 console.log(`  claude-code ${humanSize(ccDest)}`);
 console.log(`  codex       ${humanSize(join(DIST_VENDOR, "codex"))}`);
 console.log(`  bun         ${humanSize(join(DIST_VENDOR, "bun"))}`);
+console.log(`  gh          ${humanSize(join(DIST_VENDOR, "gh"))}`);
+console.log(`  glab        ${humanSize(join(DIST_VENDOR, "glab"))}`);

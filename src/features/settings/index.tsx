@@ -50,6 +50,7 @@ import {
 import type { ThemeMode } from "@/lib/settings";
 import { useSettings } from "@/lib/settings";
 import { clampEffort, findModelOption } from "@/lib/workspace-helpers";
+import { AccountPanel } from "./panels/account";
 import { AppUpdatesPanel } from "./panels/app-updates";
 import { CliInstallPanel } from "./panels/cli-install";
 import { ConductorImportPanel } from "./panels/conductor-import";
@@ -68,6 +69,7 @@ type SettingsSection =
 	| "experimental"
 	| "import"
 	| "developer"
+	| "account"
 	| `repo:${string}`;
 
 function sidebarSectionLabel(
@@ -168,6 +170,7 @@ export const SettingsDialog = memo(function SettingsDialog({
 		"experimental",
 		...(conductorEnabled ? (["import"] as const) : []),
 		...(isDev ? (["developer"] as const) : []),
+		"account",
 	];
 
 	const activeRepoId = activeSection.startsWith("repo:")
@@ -581,13 +584,20 @@ export const SettingsDialog = memo(function SettingsDialog({
 
 							{activeSection === "experimental" && (
 								<div className="flex flex-col gap-3">
-									<CliInstallPanel repositories={repositories} />
+									<CliInstallPanel />
 								</div>
 							)}
 
 							{activeSection === "import" && <ConductorImportPanel />}
 
 							{activeSection === "developer" && <DevToolsPanel />}
+
+							{activeSection === "account" && (
+								<AccountPanel
+									repositories={repositories}
+									onSignedOut={onClose}
+								/>
+							)}
 
 							{activeRepo && (
 								<RepositorySettingsPanel
