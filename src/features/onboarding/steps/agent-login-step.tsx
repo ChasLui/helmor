@@ -1,4 +1,4 @@
-import { ArrowRight } from "lucide-react";
+import { ArrowLeft, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AgentStatusAction } from "../components/agent-status-action";
 import type { AgentLoginItem, OnboardingStep } from "../types";
@@ -6,10 +6,12 @@ import type { AgentLoginItem, OnboardingStep } from "../types";
 export function AgentLoginStep({
 	step,
 	loginItems,
+	onBack,
 	onNext,
 }: {
 	step: OnboardingStep;
 	loginItems: AgentLoginItem[];
+	onBack: () => void;
 	onNext: () => void;
 }) {
 	return (
@@ -57,15 +59,27 @@ export function AgentLoginStep({
 					)}
 				</div>
 
-				<Button
-					type="button"
-					size="lg"
-					onClick={onNext}
-					className="mt-7 h-11 gap-2 px-4 text-[0.95rem]"
-				>
-					Next
-					<ArrowRight data-icon="inline-end" className="size-4" />
-				</Button>
+				<div className="mt-7 flex items-center gap-3">
+					<Button
+						type="button"
+						variant="ghost"
+						size="lg"
+						onClick={onBack}
+						className="h-11 gap-2 px-4 text-[0.95rem]"
+					>
+						<ArrowLeft data-icon="inline-start" className="size-4" />
+						Back
+					</Button>
+					<Button
+						type="button"
+						size="lg"
+						onClick={onNext}
+						className="h-11 gap-2 px-4 text-[0.95rem]"
+					>
+						Next
+						<ArrowRight data-icon="inline-end" className="size-4" />
+					</Button>
+				</div>
 			</div>
 		</section>
 	);

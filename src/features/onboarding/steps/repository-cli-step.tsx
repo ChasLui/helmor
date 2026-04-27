@@ -1,14 +1,16 @@
 import { MarkGithubIcon } from "@primer/octicons-react";
-import { ArrowRight, GitPullRequestArrow } from "lucide-react";
+import { ArrowLeft, ArrowRight, GitPullRequestArrow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { SetupItem } from "../components/setup-item";
 import type { OnboardingStep } from "../types";
 
 export function RepositoryCliStep({
 	step,
+	onBack,
 	onNext,
 }: {
 	step: OnboardingStep;
+	onBack: () => void;
 	onNext: () => void;
 }) {
 	return (
@@ -45,15 +47,27 @@ export function RepositoryCliStep({
 					/>
 				</div>
 
-				<Button
-					type="button"
-					size="lg"
-					onClick={onNext}
-					className="mt-7 h-11 gap-2 px-4 text-[0.95rem]"
-				>
-					Next
-					<ArrowRight data-icon="inline-end" className="size-4" />
-				</Button>
+				<div className="mt-7 flex items-center gap-3">
+					<Button
+						type="button"
+						variant="ghost"
+						size="lg"
+						onClick={onBack}
+						className="h-11 gap-2 px-4 text-[0.95rem]"
+					>
+						<ArrowLeft data-icon="inline-start" className="size-4" />
+						Back
+					</Button>
+					<Button
+						type="button"
+						size="lg"
+						onClick={onNext}
+						className="h-11 gap-2 px-4 text-[0.95rem]"
+					>
+						Next
+						<ArrowRight data-icon="inline-end" className="size-4" />
+					</Button>
+				</div>
 			</div>
 		</section>
 	);

@@ -43,7 +43,7 @@ export function IntroPreview({
 					onClick={onNext}
 					className="mt-7 h-10 gap-2 px-3.5 text-[0.875rem]"
 				>
-					Next
+					Explore
 					<ArrowRight data-icon="inline-end" className="size-4" />
 				</Button>
 			</section>
@@ -96,6 +96,7 @@ export function IntroPreview({
 					<HelmorOnboardingMockup
 						interactive={step !== "intro"}
 						providerSpotlight={step === "agents"}
+						gitHeaderSpotlight={step === "corner"}
 					/>
 				</div>
 			</section>

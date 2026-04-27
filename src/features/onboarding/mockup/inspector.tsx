@@ -25,13 +25,21 @@ import {
  * (shell + section + folder header + change row + action row + tabs section)
  * with static mock data.
  */
-export function MockInspector() {
+export function MockInspector({
+	gitHeaderSpotlight = false,
+}: {
+	gitHeaderSpotlight?: boolean;
+} = {}) {
 	return (
 		<InspectorShellUI>
 			<InspectorSectionUI
 				title="Git"
 				containerClassName="h-[270px]"
-				headerClassName="rounded-tr-[16px]"
+				headerClassName={
+					gitHeaderSpotlight
+						? "rounded-tr-[16px] relative z-40 isolate bg-sidebar"
+						: "rounded-tr-[16px]"
+				}
 				bodyClassName="bg-muted/20 font-mono text-[11.5px]"
 				rightSlot={
 					<Button

@@ -212,18 +212,27 @@ export function AppOnboarding({ onComplete }: AppOnboardingProps) {
 			<AgentLoginStep
 				step={step}
 				loginItems={loginItems}
+				onBack={() => {
+					setStep("intro");
+				}}
 				onNext={() => {
 					setStep("corner");
 				}}
 			/>
 			<RepositoryCliStep
 				step={step}
+				onBack={() => {
+					setStep("agents");
+				}}
 				onNext={() => {
 					setStep("skills");
 				}}
 			/>
 			<SkillsStep
 				step={step}
+				onBack={() => {
+					setStep("corner");
+				}}
 				onNext={() => {
 					void handleSkillsNext();
 				}}
@@ -237,6 +246,9 @@ export function AppOnboarding({ onComplete }: AppOnboardingProps) {
 				repoImportError={repoImportError}
 				onAddLocalRepository={addLocalRepository}
 				onOpenCloneDialog={openCloneDialog}
+				onBack={() => {
+					setStep("skills");
+				}}
 				onComplete={completeOnboarding}
 			/>
 			<CloneFromUrlDialog

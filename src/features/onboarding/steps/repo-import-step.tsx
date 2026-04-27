@@ -1,4 +1,4 @@
-import { ArrowRight, Cloud, FolderOpen } from "lucide-react";
+import { ArrowLeft, ArrowRight, Cloud, FolderOpen } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ImportedRepository, OnboardingStep } from "../types";
 
@@ -10,6 +10,7 @@ export function RepoImportStep({
 	repoImportError,
 	onAddLocalRepository,
 	onOpenCloneDialog,
+	onBack,
 	onComplete,
 }: {
 	step: OnboardingStep;
@@ -19,6 +20,7 @@ export function RepoImportStep({
 	repoImportError: string | null;
 	onAddLocalRepository: () => void;
 	onOpenCloneDialog: () => void;
+	onBack: () => void;
 	onComplete: () => void;
 }) {
 	return (
@@ -132,7 +134,17 @@ export function RepoImportStep({
 					</div>
 				</div>
 
-				<div className="mt-7 flex justify-center">
+				<div className="mt-7 flex items-center justify-center gap-3">
+					<Button
+						type="button"
+						variant="ghost"
+						size="lg"
+						onClick={onBack}
+						className="h-11 gap-2 px-4 text-[0.95rem]"
+					>
+						<ArrowLeft data-icon="inline-start" className="size-4" />
+						Back
+					</Button>
 					<Button
 						type="button"
 						size="lg"

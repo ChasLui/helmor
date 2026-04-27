@@ -18,6 +18,7 @@ const MOCKUP_INSPECTOR_WIDTH = 280;
 export function HelmorOnboardingMockup({
 	interactive = false,
 	providerSpotlight = false,
+	gitHeaderSpotlight = false,
 }: {
 	/**
 	 * When false (default), interactive affordances inside the mockup
@@ -28,7 +29,9 @@ export function HelmorOnboardingMockup({
 	 */
 	interactive?: boolean;
 	providerSpotlight?: boolean;
+	gitHeaderSpotlight?: boolean;
 } = {}) {
+	const spotlightActive = providerSpotlight || gitHeaderSpotlight;
 	const containerRef = useRef<HTMLDivElement>(null);
 	const [scale, setScale] = useState(0.5);
 
@@ -50,7 +53,7 @@ export function HelmorOnboardingMockup({
 			ref={containerRef}
 			aria-label="Helmor workspace preview"
 			className={`aspect-[1300/900] w-full overflow-hidden text-foreground transition-colors duration-1000 ${
-				providerSpotlight ? "bg-black/42" : "bg-background"
+				spotlightActive ? "bg-black/42" : "bg-background"
 			}`}
 		>
 			<div
@@ -68,18 +71,18 @@ export function HelmorOnboardingMockup({
 					<MockSidebar interactive={interactive} />
 				</div>
 				<div className="w-px shrink-0 bg-border" />
-				<MockConversation />
+				<MockConversation providerSpotlight={providerSpotlight} />
 				<div className="w-px shrink-0 bg-border" />
 				<div
 					className="flex h-full shrink-0"
 					style={{ width: `${MOCKUP_INSPECTOR_WIDTH}px` }}
 				>
-					<MockInspector />
+					<MockInspector gitHeaderSpotlight={gitHeaderSpotlight} />
 				</div>
 				<div
 					aria-hidden
 					className={`pointer-events-none absolute -inset-2 z-20 transition-colors duration-[600ms] ${
-						providerSpotlight ? "bg-black/55" : "bg-transparent"
+						spotlightActive ? "bg-black/55" : "bg-transparent"
 					}`}
 				/>
 			</div>
