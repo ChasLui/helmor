@@ -376,6 +376,18 @@ fn run_migrations(connection: &Connection) -> Result<()> {
             .context("Failed to add forge_provider column")?;
     }
 
+    if has_table(connection, "repos") && !has_column(connection, "repos", "branch_prefix_type") {
+        connection
+            .execute_batch("ALTER TABLE repos ADD COLUMN branch_prefix_type TEXT")
+            .context("Failed to add branch_prefix_type column")?;
+    }
+
+    if has_table(connection, "repos") && !has_column(connection, "repos", "branch_prefix_custom") {
+        connection
+            .execute_batch("ALTER TABLE repos ADD COLUMN branch_prefix_custom TEXT")
+            .context("Failed to add branch_prefix_custom column")?;
+    }
+
     if has_table(connection, "workspaces") && !has_column(connection, "workspaces", "pr_sync_state")
     {
         connection
@@ -464,6 +476,8 @@ CREATE TABLE IF NOT EXISTS repos (
     custom_prompt_resolve_merge_conflicts TEXT,
     auto_run_setup INTEGER DEFAULT 1,
     forge_provider TEXT,
+    branch_prefix_type TEXT,
+    branch_prefix_custom TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

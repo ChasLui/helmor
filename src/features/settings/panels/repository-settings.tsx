@@ -16,6 +16,7 @@ import {
 	CommandList,
 } from "@/components/ui/command";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Input } from "@/components/ui/input";
 import {
 	Popover,
 	PopoverContent,
@@ -31,6 +32,7 @@ import {
 } from "@/components/ui/tooltip";
 import {
 	deleteRepository,
+	getForgeCliStatus,
 	listRemoteBranches,
 	listRepoRemotes,
 	loadRepoScripts,
@@ -38,20 +40,25 @@ import {
 	type RepositoryCreateOption,
 	updateRepoAutoRunSetup,
 	updateRepoScripts,
+	updateRepositoryBranchPrefix,
 	updateRepositoryDefaultBranch,
 	updateRepositoryRemote,
 } from "@/lib/api";
+import { useSettings } from "@/lib/settings";
 import { cn } from "@/lib/utils";
 import { SettingsGroup } from "../components/settings-row";
+import { parseRemoteHost } from "./cli-install-gitlab-hosts";
 import { RepositoryPreferencesSection } from "./repository-preferences-section";
 
 export function RepositorySettingsPanel({
 	repo,
+	githubLogin,
 	workspaceId,
 	onRepoSettingsChanged,
 	onRepoDeleted,
 }: {
 	repo: RepositoryCreateOption;
+	githubLogin: string | null;
 	workspaceId: string | null;
 	onRepoSettingsChanged: () => void;
 	onRepoDeleted: () => void;
@@ -226,12 +233,135 @@ export function RepositorySettingsPanel({
 				</div>
 			</div>
 
+			<BranchPrefixSection
+				repo={repo}
+				githubLogin={githubLogin}
+				onChanged={onRepoSettingsChanged}
+			/>
+
 			<ScriptsSection repoId={repo.id} workspaceId={workspaceId} />
 			<RepositoryPreferencesSection repoId={repo.id} />
 
 			<DeleteRepoSection repo={repo} onDeleted={onRepoDeleted} />
 		</SettingsGroup>
 	);
+}
+
+function BranchPrefixSection({
+	repo,
+	githubLogin,
+	onChanged,
+}: {
+	repo: RepositoryCreateOption;
+	githubLogin: string | null;
+	onChanged: () => void;
+}) {
+	const { settings } = useSettings();
+	const [customPrefix, setCustomPrefix] = useState(
+		repo.branchPrefixType === "custom" ? (repo.branchPrefixCustom ?? "") : "",
+	);
+	const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const gitlabHost = parseRemoteHost(repo.remoteUrl);
+	const isGitLabRepo =
+		repo.forgeProvider === "gitlab" ||
+		(repo.forgeProvider !== "github" && !!gitlabHost?.includes("gitlab"));
+	const gitlabStatusQuery = useQuery({
+		queryKey: ["forgeCliStatus", "gitlab", gitlabHost ?? "gitlab.com"],
+		queryFn: () => getForgeCliStatus("gitlab", gitlabHost),
+		enabled: isGitLabRepo && settings.branchPrefixType === "github",
+		staleTime: 2000,
+	});
+	const gitlabLogin =
+		gitlabStatusQuery.data?.status === "ready"
+			? gitlabStatusQuery.data.login
+			: null;
+	const inheritedPrefix = resolveInheritedBranchPrefix({
+		type: settings.branchPrefixType,
+		custom: settings.branchPrefixCustom,
+		githubLogin,
+		gitlabLogin,
+		isGitLabRepo,
+	});
+	const inheritedPlaceholder = inheritedPrefix || "No prefix";
+
+	useEffect(() => {
+		setCustomPrefix(
+			repo.branchPrefixType === "custom" ? (repo.branchPrefixCustom ?? "") : "",
+		);
+	}, [repo.id, repo.branchPrefixType, repo.branchPrefixCustom]);
+
+	useEffect(() => {
+		return () => {
+			if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+		};
+	}, []);
+
+	const save = useCallback(
+		(nextCustom: string) => {
+			if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+			saveTimerRef.current = setTimeout(() => {
+				void updateRepositoryBranchPrefix(
+					repo.id,
+					"custom",
+					nextCustom.trim() || null,
+				).then(onChanged);
+			}, 400);
+		},
+		[repo.id, onChanged],
+	);
+
+	return (
+		<div className="py-5">
+			<div className="text-[13px] font-medium leading-snug text-foreground">
+				Branch prefix
+			</div>
+			<div className="mt-1 text-[12px] leading-snug text-muted-foreground">
+				Leave empty to inherit the global prefix.
+			</div>
+			<div className="mt-4">
+				<Input
+					type="text"
+					value={customPrefix}
+					onChange={(event) => {
+						const value = event.target.value;
+						setCustomPrefix(value);
+						save(value);
+					}}
+					placeholder={inheritedPlaceholder}
+					className="w-full bg-app-base/30 text-[13px] text-app-foreground placeholder:text-muted-foreground/50"
+				/>
+				{customPrefix ? (
+					<div className="mt-1.5 text-[12px] text-muted-foreground">
+						Preview: {customPrefix}tokyo
+					</div>
+				) : (
+					<div className="mt-1.5 text-[12px] text-muted-foreground">
+						Using global:{" "}
+						{inheritedPrefix ? `${inheritedPrefix}tokyo` : "tokyo"}
+					</div>
+				)}
+			</div>
+		</div>
+	);
+}
+
+function resolveInheritedBranchPrefix({
+	type,
+	custom,
+	githubLogin,
+	gitlabLogin,
+	isGitLabRepo,
+}: {
+	type: "github" | "custom" | "none";
+	custom: string;
+	githubLogin: string | null;
+	gitlabLogin: string | null;
+	isGitLabRepo: boolean;
+}): string {
+	if (type === "custom") return custom.trim();
+	if (type === "none") return "";
+	const login = isGitLabRepo ? gitlabLogin : githubLogin;
+	return login ? `${login}/` : "";
 }
 
 function ScriptField({

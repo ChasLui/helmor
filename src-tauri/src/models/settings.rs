@@ -7,6 +7,8 @@ use super::db;
 pub struct BranchPrefixSettings {
     pub branch_prefix_type: Option<String>,
     pub branch_prefix_custom: Option<String>,
+    pub forge_provider: Option<String>,
+    pub remote_url: Option<String>,
 }
 
 pub fn load_setting_value(key: &str) -> Result<Option<String>> {
@@ -124,6 +126,8 @@ pub fn load_branch_prefix_settings() -> Result<BranchPrefixSettings> {
     let mut settings = BranchPrefixSettings {
         branch_prefix_type: None,
         branch_prefix_custom: None,
+        forge_provider: None,
+        remote_url: None,
     };
 
     for row in rows {

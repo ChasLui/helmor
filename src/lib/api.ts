@@ -169,6 +169,8 @@ export type RepositoryCreateOption = {
 	remote?: string | null;
 	remoteUrl?: string | null;
 	defaultBranch?: string | null;
+	branchPrefixType?: "github" | "custom" | "none" | null;
+	branchPrefixCustom?: string | null;
 	forgeProvider?: ForgeProvider | null;
 	repoIconSrc?: string | null;
 	repoInitials?: string | null;
@@ -735,6 +737,18 @@ export async function updateRepositoryDefaultBranch(
 	await invoke<void>("update_repository_default_branch", {
 		repoId,
 		defaultBranch,
+	});
+}
+
+export async function updateRepositoryBranchPrefix(
+	repoId: string,
+	branchPrefixType: "github" | "custom" | "none",
+	branchPrefixCustom?: string | null,
+): Promise<void> {
+	await invoke<void>("update_repository_branch_prefix", {
+		repoId,
+		branchPrefixType,
+		branchPrefixCustom,
 	});
 }
 

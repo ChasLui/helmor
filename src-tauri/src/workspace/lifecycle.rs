@@ -13,7 +13,7 @@ use crate::{
     error::{coded, ErrorCode},
     git_ops, helpers,
     models::workspaces as workspace_models,
-    repos, settings,
+    repos,
     workspace_state::WorkspaceState,
 };
 
@@ -134,7 +134,7 @@ pub fn prepare_workspace_from_repo_impl(repo_id: &str) -> Result<PrepareWorkspac
     }
 
     let directory_name = helpers::allocate_directory_name_for_repo(repo_id)?;
-    let branch_settings = settings::load_branch_prefix_settings()?;
+    let branch_settings = crate::repos::load_repo_branch_prefix_settings(repo_id)?;
     let branch = helpers::branch_name_for_directory(&directory_name, &branch_settings);
     let default_branch = repository
         .default_branch

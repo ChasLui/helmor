@@ -94,12 +94,17 @@ pub async fn generate_session_title(
         None
     };
 
-    let branch_settings = crate::settings::load_branch_prefix_settings().unwrap_or(
-        crate::settings::BranchPrefixSettings {
-            branch_prefix_type: None,
-            branch_prefix_custom: None,
-        },
-    );
+    let branch_settings = workspace_info
+        .as_ref()
+        .and_then(|(_, repo_id, _, _, _)| {
+            crate::repos::load_repo_branch_prefix_settings(repo_id).ok()
+        })
+        .unwrap_or(crate::settings::BranchPrefixSettings {
+            branch_prefix_type: Some("github".to_string()),
+            branch_prefix_custom: Some(String::new()),
+            forge_provider: Some("github".to_string()),
+            remote_url: None,
+        });
 
     let should_generate_branch =
         workspace_info

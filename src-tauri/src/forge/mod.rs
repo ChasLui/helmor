@@ -27,7 +27,7 @@ mod detect;
 pub mod github;
 mod gitlab;
 mod provider;
-mod remote;
+pub(crate) mod remote;
 pub(crate) mod status_cache;
 mod types;
 mod workspace;
