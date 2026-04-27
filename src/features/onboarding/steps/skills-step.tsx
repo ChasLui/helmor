@@ -176,7 +176,7 @@ Options:
 					/>
 					<SetupItem
 						icon={<PackageCheck className="size-5" />}
-						label="Skills"
+						label="Helmor Skills (Beta)"
 						description="Install skills so Helmor can help with more workflows across every workspace."
 					/>
 				</div>
