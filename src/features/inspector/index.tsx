@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type {
 	CommitButtonState,
 	WorkspaceCommitButtonMode,
@@ -15,6 +15,8 @@ import { ActionsSection } from "./sections/actions";
 import { ChangesSection } from "./sections/changes";
 import { OpenDevServerButton, RunTab } from "./sections/run";
 import { SetupTab } from "./sections/setup";
+import { TerminalTab } from "./sections/terminal";
+import { subscribeToWorkspaceList } from "./terminal-store";
 
 type WorkspaceInspectorSidebarProps = {
 	workspaceId?: string | null;
@@ -40,6 +42,11 @@ type WorkspaceInspectorSidebarProps = {
 	commitButtonMode?: WorkspaceCommitButtonMode;
 	commitButtonState?: CommitButtonState;
 	changeRequest?: ChangeRequestInfo | null;
+	/**
+	 * True only on the first cold fetch of either the PR change request or
+	 * the forge action status — drives the git-header shimmer. Owned by App.
+	 */
+	forgeIsRefreshing?: boolean;
 	onOpenSettings?: () => void;
 };
 
@@ -59,6 +66,7 @@ export function WorkspaceInspectorSidebar({
 	commitButtonMode,
 	commitButtonState,
 	changeRequest,
+	forgeIsRefreshing = false,
 	onOpenSettings,
 }: WorkspaceInspectorSidebarProps) {
 	const {
@@ -120,16 +128,32 @@ export function WorkspaceInspectorSidebar({
 		!!repoScripts?.runScript?.trim(),
 	);
 
+	// Live count of Terminal sub-tabs for the current workspace, observed at
+	// the sidebar level so the count badge next to the "Terminal" tab label
+	// updates even when the tab body is collapsed / not mounted.
+	const [terminalCount, setTerminalCount] = useState(0);
+	useEffect(() => {
+		if (!workspaceId) {
+			setTerminalCount(0);
+			return;
+		}
+		return subscribeToWorkspaceList(workspaceId, (list) => {
+			setTerminalCount(list.length);
+		});
+	}, [workspaceId]);
+
 	// Only allow hover-to-zoom when the active tab has real terminal output.
 	// "idle" = script configured but never run; "no-script" = nothing to run.
 	// In both cases the body is a placeholder (Run / Open-settings button)
 	// that doesn't benefit from — and shouldn't trigger — the enlargement.
-	const activeTabState =
+	const scriptTabState =
 		activeTab === "setup" ? setupScriptState : runScriptState;
 	const canHoverExpand =
-		activeTabState === "running" ||
-		activeTabState === "success" ||
-		activeTabState === "failure";
+		activeTab === "terminal"
+			? terminalCount > 0
+			: scriptTabState === "running" ||
+				scriptTabState === "success" ||
+				scriptTabState === "failure";
 
 	const handleOpenSettings = onOpenSettings ?? (() => {});
 
@@ -155,6 +179,7 @@ export function WorkspaceInspectorSidebar({
 				commitButtonMode={commitButtonMode}
 				commitButtonState={commitButtonState}
 				changeRequest={changeRequest ?? null}
+				forgeIsRefreshing={forgeIsRefreshing}
 			/>
 
 			<HorizontalResizeHandle
@@ -194,6 +219,7 @@ export function WorkspaceInspectorSidebar({
 				tabActions={runTabActions}
 				setupScriptState={setupScriptState}
 				runScriptState={runScriptState}
+				terminalCount={terminalCount}
 				canHoverExpand={canHoverExpand}
 			>
 				<SetupTab
@@ -211,6 +237,11 @@ export function WorkspaceInspectorSidebar({
 					onOpenSettings={handleOpenSettings}
 					onStatusChange={setRunStatus}
 					onUrlsChange={setRunUrls}
+				/>
+				<TerminalTab
+					repoId={repoId ?? null}
+					workspaceId={workspaceId ?? null}
+					isActive={activeTab === "terminal"}
 				/>
 			</InspectorTabsSection>
 		</div>

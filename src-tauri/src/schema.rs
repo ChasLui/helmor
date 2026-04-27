@@ -99,6 +99,10 @@ const DEAD_TABLES: &[(&str, &[&str])] = &[
         ],
     ),
     ("diff_comments", &["idx_diff_comments_workspace"]),
+    // Briefly existed during the Terminal-tab persistence experiment. We
+    // decided not to ship cross-restart history; this drop cleans up dev DBs
+    // that ran the intermediate code so they don't carry an orphan table.
+    ("terminal_history", &["idx_terminal_history_workspace"]),
 ];
 
 fn drop_dead_schema(connection: &Connection) -> Result<()> {
@@ -379,6 +383,16 @@ fn run_migrations(connection: &Connection) -> Result<()> {
             .context("Failed to add pr_sync_state column")?;
     }
 
+    // Migration: cache the live PR/MR url on the workspace row so the
+    // inspector can render the PR badge optimistically (before the live
+    // forge query returns). The PR number is parsed from the URL on the
+    // frontend, so storing the URL alone covers both fields.
+    if has_table(connection, "workspaces") && !has_column(connection, "workspaces", "pr_url") {
+        connection
+            .execute_batch("ALTER TABLE workspaces ADD COLUMN pr_url TEXT")
+            .context("Failed to add pr_url column")?;
+    }
+
     let had_workspace_status =
         has_table(connection, "workspaces") && has_column(connection, "workspaces", "status");
     if has_table(connection, "workspaces") && !had_workspace_status {
@@ -485,6 +499,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
     intended_target_branch TEXT,
     pr_title TEXT,
     pr_sync_state TEXT DEFAULT 'none',
+    pr_url TEXT,
     archive_commit TEXT,
     linked_directory_paths TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),

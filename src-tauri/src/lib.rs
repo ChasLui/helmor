@@ -225,6 +225,10 @@ pub fn run() {
             commands::script_commands::stop_repo_script,
             commands::script_commands::write_repo_script_stdin,
             commands::script_commands::resize_repo_script,
+            commands::terminal_commands::spawn_terminal,
+            commands::terminal_commands::stop_terminal,
+            commands::terminal_commands::write_terminal_stdin,
+            commands::terminal_commands::resize_terminal,
             commands::session_commands::list_session_thread_messages,
             commands::workspace_commands::list_workspace_groups,
             commands::session_commands::list_workspace_sessions,
@@ -340,6 +344,12 @@ pub fn run() {
         } => {
             api.prevent_exit();
             emit_quit_requested(app_handle);
+        }
+        // Install pending update on the way out so the next launch is the
+        // new version. By this point `request_quit` has stopped watchers
+        // and torn down the sidecar, so blocking briefly here is safe.
+        tauri::RunEvent::Exit => {
+            updater::install_pending_on_exit_blocking();
         }
         _ => {}
     });

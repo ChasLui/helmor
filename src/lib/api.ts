@@ -35,6 +35,14 @@ export type WorkspaceStatus =
 	| "canceled";
 
 /**
+ * Mirror of the Rust `PrSyncState` enum
+ * (`src-tauri/src/workspace/pr_sync.rs`). Cached on the workspace row so the
+ * inspector can render the PR badge optimistically before the live forge
+ * query returns.
+ */
+export type PrSyncState = "none" | "open" | "closed" | "merged";
+
+/**
  * Mirror of the Rust `ActionKind` enum
  * (`src-tauri/src/agents/action_kind.rs`). Non-null when the session was
  * created as a one-off "action" dispatch from the inspector commit button.
@@ -69,6 +77,8 @@ export type WorkspaceRow = {
 	activeSessionAgentType?: string | null;
 	activeSessionStatus?: string | null;
 	prTitle?: string | null;
+	prSyncState?: PrSyncState;
+	prUrl?: string | null;
 	pinnedAt?: string | null;
 	sessionCount?: number;
 	messageCount?: number;
@@ -145,6 +155,8 @@ export type WorkspaceSummary = {
 	activeSessionAgentType?: string | null;
 	activeSessionStatus?: string | null;
 	prTitle?: string | null;
+	prSyncState?: PrSyncState;
+	prUrl?: string | null;
 	pinnedAt?: string | null;
 	sessionCount?: number;
 	messageCount?: number;
@@ -329,6 +341,8 @@ export type WorkspaceDetail = {
 	intendedTargetBranch?: string | null;
 	pinnedAt?: string | null;
 	prTitle?: string | null;
+	prSyncState?: PrSyncState;
+	prUrl?: string | null;
 	archiveCommit?: string | null;
 	sessionCount: number;
 	messageCount: number;
@@ -462,6 +476,11 @@ export type AppUpdateInfo = {
 	releaseUrl: string;
 };
 
+export type AppUpdateProgress = {
+	downloaded: number;
+	total?: number | null;
+};
+
 export type AppUpdateStatus = {
 	stage: AppUpdateStage;
 	configured: boolean;
@@ -470,6 +489,7 @@ export type AppUpdateStatus = {
 	lastError?: string | null;
 	lastAttemptAt?: string | null;
 	downloadedAt?: string | null;
+	progress?: AppUpdateProgress | null;
 };
 
 const DEFAULT_WORKSPACE_GROUPS: WorkspaceGroup[] = [
@@ -2388,6 +2408,76 @@ export async function resizeRepoScript(
 		repoId,
 		scriptType,
 		workspaceId: workspaceId ?? null,
+		cols,
+		rows,
+	});
+}
+
+/**
+ * Spawn a blank interactive `$SHELL -i -l` on a fresh PTY in the workspace
+ * directory. Each Terminal sub-tab in the Inspector is one of these.
+ *
+ * `instanceId` distinguishes concurrent terminals within the same workspace;
+ * the backend keys its `ScriptProcessManager` on `(repoId, "terminal:<instanceId>",
+ * workspaceId)`, so spawning twice with the same `instanceId` would replace
+ * the previous shell — callers must mint a fresh UUID per sub-tab.
+ *
+ * Nothing is persisted: closing the app discards every sub-tab and its
+ * output. Cross-tab / cross-workspace survival is in-memory only.
+ */
+export async function spawnTerminal(
+	repoId: string,
+	workspaceId: string,
+	instanceId: string,
+	onEvent: (event: ScriptEvent) => void,
+): Promise<void> {
+	const channel = new Channel<ScriptEvent>();
+	channel.onmessage = onEvent;
+	await invoke("spawn_terminal", {
+		repoId,
+		workspaceId,
+		instanceId,
+		channel,
+	});
+}
+
+export async function stopTerminal(
+	repoId: string,
+	workspaceId: string,
+	instanceId: string,
+): Promise<boolean> {
+	return invoke<boolean>("stop_terminal", {
+		repoId,
+		workspaceId,
+		instanceId,
+	});
+}
+
+export async function writeTerminalStdin(
+	repoId: string,
+	workspaceId: string,
+	instanceId: string,
+	data: string,
+): Promise<boolean> {
+	return invoke<boolean>("write_terminal_stdin", {
+		repoId,
+		workspaceId,
+		instanceId,
+		data,
+	});
+}
+
+export async function resizeTerminal(
+	repoId: string,
+	workspaceId: string,
+	instanceId: string,
+	cols: number,
+	rows: number,
+): Promise<boolean> {
+	return invoke<boolean>("resize_terminal", {
+		repoId,
+		workspaceId,
+		instanceId,
 		cols,
 		rows,
 	});
