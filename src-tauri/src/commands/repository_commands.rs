@@ -49,6 +49,17 @@ pub async fn update_repository_default_branch(
 }
 
 #[tauri::command]
+pub async fn update_repository_branch_prefix(
+    repo_id: String,
+    branch_prefix_custom: Option<String>,
+) -> CmdResult<()> {
+    run_blocking(move || {
+        repos::update_repository_branch_prefix(&repo_id, branch_prefix_custom.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn update_repository_remote(
     app: AppHandle,
     repo_id: String,

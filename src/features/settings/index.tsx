@@ -564,6 +564,7 @@ export const SettingsDialog = memo(function SettingsDialog({
 							{activeRepo && (
 								<RepositorySettingsPanel
 									repo={activeRepo}
+									githubLogin={githubLogin}
 									workspaceId={
 										activeRepo.id === workspaceRepoId ? workspaceId : null
 									}

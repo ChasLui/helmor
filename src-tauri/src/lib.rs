@@ -234,6 +234,7 @@ pub fn run() {
             commands::workspace_commands::list_archived_workspaces,
             commands::repository_commands::list_repositories,
             commands::repository_commands::update_repository_default_branch,
+            commands::repository_commands::update_repository_branch_prefix,
             commands::repository_commands::update_repository_remote,
             commands::repository_commands::list_repo_remotes,
             commands::repository_commands::load_repo_scripts,

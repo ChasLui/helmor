@@ -1,6 +1,6 @@
 import type { RepositoryCreateOption } from "@/lib/api";
 
-function parseRemoteHost(remoteUrl?: string | null): string | null {
+export function parseRemoteHost(remoteUrl?: string | null): string | null {
 	const value = remoteUrl?.trim();
 	if (!value) return null;
 	const scpLike = value.match(/^[^@]+@([^:]+):/);

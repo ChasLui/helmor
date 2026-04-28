@@ -22,6 +22,7 @@ pub struct RepositoryCreateOption {
     pub remote: Option<String>,
     pub remote_url: Option<String>,
     pub default_branch: Option<String>,
+    pub branch_prefix_custom: Option<String>,
     pub forge_provider: Option<String>,
     pub repo_icon_src: Option<String>,
     pub repo_initials: String,
@@ -87,7 +88,8 @@ pub fn list_repositories() -> Result<Vec<RepositoryCreateOption>> {
               root_path,
               remote,
               remote_url,
-              forge_provider
+              forge_provider,
+              branch_prefix_custom
             FROM repos
             WHERE COALESCE(hidden, 0) = 0
             ORDER BY COALESCE(display_order, 0) ASC, LOWER(name) ASC
@@ -108,6 +110,7 @@ pub fn list_repositories() -> Result<Vec<RepositoryCreateOption>> {
                 remote: row.get(4)?,
                 remote_url: row.get(5)?,
                 forge_provider: row.get(6)?,
+                branch_prefix_custom: row.get(7)?,
                 default_branch: row.get(2)?,
                 repo_icon_src: icon_src,
                 repo_initials: initials,
@@ -423,6 +426,78 @@ pub fn update_repository_default_branch(repo_id: &str, default_branch: &str) -> 
             [default_branch, repo_id],
         )
         .with_context(|| format!("Failed to update default branch for {repo_id}"))?;
+
+    if updated != 1 {
+        bail!("Repository not found: {repo_id}");
+    }
+
+    Ok(())
+}
+
+pub fn load_repo_branch_prefix_settings(
+    repo_id: &str,
+) -> Result<crate::settings::EffectiveBranchPrefixSettings> {
+    let connection = db::read_conn()?;
+    let mut statement = connection
+        .prepare("SELECT branch_prefix_custom, forge_provider, remote_url FROM repos WHERE id = ?1")
+        .with_context(|| format!("Failed to prepare branch prefix lookup for {repo_id}"))?;
+
+    let repo_settings: crate::settings::EffectiveBranchPrefixSettings = statement
+        .query_row([repo_id], |row| {
+            Ok(crate::settings::EffectiveBranchPrefixSettings {
+                branch_prefix_type: None,
+                branch_prefix_custom: row.get(0)?,
+                forge_provider: row.get(1)?,
+                remote_url: row.get(2)?,
+            })
+        })
+        .with_context(|| format!("Repository not found: {repo_id}"))?;
+
+    let custom_override = repo_settings
+        .branch_prefix_custom
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(custom) = custom_override {
+        return Ok(crate::settings::EffectiveBranchPrefixSettings {
+            branch_prefix_type: Some("custom".to_string()),
+            branch_prefix_custom: Some(custom.to_string()),
+            forge_provider: repo_settings.forge_provider,
+            remote_url: repo_settings.remote_url,
+        });
+    }
+
+    let fallback = crate::settings::load_branch_prefix_settings().unwrap_or(
+        crate::settings::BranchPrefixSettings {
+            branch_prefix_type: None,
+            branch_prefix_custom: None,
+        },
+    );
+
+    Ok(crate::settings::EffectiveBranchPrefixSettings {
+        branch_prefix_type: fallback.branch_prefix_type,
+        branch_prefix_custom: fallback.branch_prefix_custom,
+        forge_provider: repo_settings.forge_provider,
+        remote_url: repo_settings.remote_url,
+    })
+}
+
+pub fn update_repository_branch_prefix(
+    repo_id: &str,
+    branch_prefix_custom: Option<&str>,
+) -> Result<()> {
+    let branch_prefix_custom = branch_prefix_custom
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let connection = db::write_conn()?;
+    let updated = connection
+        .execute(
+            "UPDATE repos SET branch_prefix_custom = ?1, updated_at = datetime('now') WHERE id = ?2",
+            rusqlite::params![branch_prefix_custom, repo_id],
+        )
+        .with_context(|| format!("Failed to update branch prefix for {repo_id}"))?;
 
     if updated != 1 {
         bail!("Repository not found: {repo_id}");
@@ -1118,5 +1193,46 @@ mod tests {
 
         let loaded = load_repository_by_id(&repo_id).unwrap().unwrap();
         assert_eq!(loaded.forge_provider.as_deref(), Some("github"));
+    }
+
+    #[test]
+    fn repository_branch_prefix_round_trips() {
+        let env = crate::testkit::TestEnv::new("repos-branch-prefix");
+        crate::settings::upsert_setting_value("branch_prefix_type", "custom").unwrap();
+        crate::settings::upsert_setting_value("branch_prefix_custom", "team/").unwrap();
+
+        let repo = ResolvedRepositoryInput {
+            name: "prefix-repo".to_string(),
+            normalized_root_path: env.root.join("prefix").display().to_string(),
+            remote: Some("origin".to_string()),
+            remote_url: Some("git@github.com:acme/prefix-repo.git".to_string()),
+            default_branch: "main".to_string(),
+            forge_provider: Some("github".to_string()),
+        };
+
+        let repo_id = insert_repository(&repo).unwrap();
+        let loaded = load_repo_branch_prefix_settings(&repo_id).unwrap();
+        assert_eq!(loaded.branch_prefix_type.as_deref(), Some("custom"));
+        assert_eq!(loaded.branch_prefix_custom.as_deref(), Some("team/"));
+
+        let listed = list_repositories().unwrap();
+        let listed_repo = listed.iter().find(|repo| repo.id == repo_id).unwrap();
+        assert_eq!(listed_repo.branch_prefix_custom.as_deref(), None);
+
+        update_repository_branch_prefix(&repo_id, Some("repo/")).unwrap();
+
+        let updated = load_repo_branch_prefix_settings(&repo_id).unwrap();
+        assert_eq!(updated.branch_prefix_type.as_deref(), Some("custom"));
+        assert_eq!(updated.branch_prefix_custom.as_deref(), Some("repo/"));
+
+        let listed = list_repositories().unwrap();
+        let listed_repo = listed.iter().find(|repo| repo.id == repo_id).unwrap();
+        assert_eq!(listed_repo.branch_prefix_custom.as_deref(), Some("repo/"));
+
+        update_repository_branch_prefix(&repo_id, None).unwrap();
+
+        let reset = load_repo_branch_prefix_settings(&repo_id).unwrap();
+        assert_eq!(reset.branch_prefix_type.as_deref(), Some("custom"));
+        assert_eq!(reset.branch_prefix_custom.as_deref(), Some("team/"));
     }
 }

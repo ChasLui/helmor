@@ -9,6 +9,14 @@ pub struct BranchPrefixSettings {
     pub branch_prefix_custom: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct EffectiveBranchPrefixSettings {
+    pub branch_prefix_type: Option<String>,
+    pub branch_prefix_custom: Option<String>,
+    pub forge_provider: Option<String>,
+    pub remote_url: Option<String>,
+}
+
 pub fn load_setting_value(key: &str) -> Result<Option<String>> {
     let connection = db::read_conn()?;
     let mut statement = connection

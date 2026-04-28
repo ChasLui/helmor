@@ -13,7 +13,6 @@ use crate::{
     error::{coded, ErrorCode},
     git_ops, helpers,
     models::workspaces::{self as workspace_models, WorkspaceRecord},
-    settings,
     workspace_pr_sync::PrSyncState,
     workspace_state,
     workspace_status::WorkspaceStatus,
@@ -583,7 +582,7 @@ pub fn continue_workspace_from_target_branch(
         bail!("Target branch {target_branch} was not found");
     };
 
-    let branch_settings = settings::load_branch_prefix_settings()?;
+    let branch_settings = crate::repos::load_repo_branch_prefix_settings(&record.repo_id)?;
     let base_branch = helpers::branch_name_for_directory(&record.directory_name, &branch_settings);
     let branch = helpers::next_available_branch_name(&repo_root, &base_branch)?;
     let workspace_dir_arg = workspace_dir.display().to_string();
