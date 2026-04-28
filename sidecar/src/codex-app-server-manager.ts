@@ -321,16 +321,27 @@ export class CodexAppServerManager implements SessionManager {
 							: undefined;
 					const msg =
 						typeof nested === "string" ? nested : "Unknown Codex error";
-					// Suppress transient errors that arrive inside the SSE
-					// retry window — Codex CLI will keep retrying on its own
-					// (it printed "Reconnecting…" on stderr within the last
-					// RETRY_SUPPRESSION_MS). Letting these propagate would
-					// kill the turn while recovery is still in progress.
+					// App-server protocol marks retryable stream errors with
+					// params.willRetry=true. Older builds also print
+					// "Reconnecting…" to stderr; keep that as a fallback only
+					// when the structured field is absent. If willRetry=false,
+					// the error is terminal even inside a recent stderr window.
+					const willRetry = deepGet(n.params, "willRetry");
 					const lastRetry = ctx.lastRetryAt ?? 0;
-					if (Date.now() - lastRetry < RETRY_SUPPRESSION_MS) {
+					const suppressForProtocolRetry = willRetry === true;
+					const suppressForLegacyRetryWindow =
+						typeof willRetry !== "boolean" &&
+						Date.now() - lastRetry < RETRY_SUPPRESSION_MS;
+					if (suppressForProtocolRetry || suppressForLegacyRetryWindow) {
+						emitter.heartbeat(requestId);
 						logger.info(
-							"suppressing Codex error inside retry window; awaiting recovery",
-							{ requestId, msg, msSinceRetry: Date.now() - lastRetry },
+							"suppressing retryable Codex error; awaiting recovery",
+							{
+								requestId,
+								msg,
+								willRetry,
+								msSinceRetry: Date.now() - lastRetry,
+							},
 						);
 						return;
 					}

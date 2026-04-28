@@ -384,6 +384,21 @@ pub(super) fn stream_via_sidecar(
                 continue;
             }
 
+            // Older sidecars forwarded Codex app-server retry notices as terminal
+            // `type:error` events after losing the structured `willRetry=true`
+            // bit. Treat those as liveness pings so an upstream SSE reconnect
+            // cannot prematurely terminate the Helmor stream.
+            if event.event_type() == "error" && bridges::is_retryable_sidecar_error(&event.raw) {
+                heartbeat_count += 1;
+                let message = event
+                    .raw
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("retryable sidecar error");
+                tracing::debug!(rid = %rid, heartbeat_count, "Ignoring retryable sidecar error: {message}");
+                continue;
+            }
+
             event_count += 1;
 
             // Claude's authoritative session_id comes only from `system.init`.

@@ -153,6 +153,28 @@ pub fn bridge_user_input_request_event(
     }
 }
 
+/// True for sidecar `error` events that are retry progress notices rather
+/// than terminal failures. Newer sidecars suppress Codex app-server
+/// `willRetry=true` notifications before they reach Rust, but this guard keeps
+/// the stream alive if an older sidecar forwards the notice as a plain
+/// `type:error` message.
+pub(super) fn is_retryable_sidecar_error(raw: &Value) -> bool {
+    for key in ["willRetry", "will_retry"] {
+        if let Some(will_retry) = raw.get(key).and_then(Value::as_bool) {
+            return will_retry;
+        }
+    }
+
+    raw.get("message")
+        .and_then(Value::as_str)
+        .is_some_and(is_reconnecting_notice)
+}
+
+fn is_reconnecting_notice(message: &str) -> bool {
+    let message = message.trim_start();
+    message.starts_with("Reconnecting...") || message.starts_with("Reconnecting…")
+}
+
 /// Pure constructor for `AgentStreamEvent::Error`. Caller decides
 /// `persisted` based on whether `persist_error_message` succeeded — the
 /// raw event itself never carries that flag.

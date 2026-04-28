@@ -301,6 +301,7 @@ fn dispatch_one(
             }
             session.handle_deferred_tool_use(raw, &resolved_model, final_messages)
         }
+        "error" if super::bridges::is_retryable_sidecar_error(raw) => Ok(vec![]),
         "error" => {
             // Persistence success is fixed at `true` so the test focuses
             // on the dispatch + state transition rather than the DB
@@ -520,6 +521,24 @@ fn error_event_terminates_session_with_internal_flag() {
                 "message": "Sidecar lost connection",
                 "internal": true
             }),
+        ],
+    );
+    assert_yaml_snapshot!(entries);
+}
+
+#[test]
+fn retryable_sidecar_error_does_not_terminate_session() {
+    let entries = dispatch_events(
+        "codex",
+        vec![
+            json!({"type": "turn/started", "session_id": "s1"}),
+            json!({
+                "type": "error",
+                "message": "Reconnecting... 1/100"
+            }),
+            json!({"type": "item/agentMessage/delta", "session_id": "s1", "delta": "Recovered"}),
+            json!({"type": "turn/completed", "session_id": "s1"}),
+            json!({"type": "end"}),
         ],
     );
     assert_yaml_snapshot!(entries);
