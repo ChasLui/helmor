@@ -301,7 +301,12 @@ fn dispatch_one(
             }
             session.handle_deferred_tool_use(raw, &resolved_model, final_messages)
         }
-        "error" if super::bridges::is_retryable_sidecar_error(raw) => Ok(vec![]),
+        "error"
+            if session.ctx.provider == "codex"
+                && super::bridges::is_retryable_sidecar_error(raw) =>
+        {
+            Ok(vec![])
+        }
         "error" => {
             // Persistence success is fixed at `true` so the test focuses
             // on the dispatch + state transition rather than the DB
@@ -539,6 +544,42 @@ fn retryable_sidecar_error_does_not_terminate_session() {
             json!({"type": "item/agentMessage/delta", "session_id": "s1", "delta": "Recovered"}),
             json!({"type": "turn/completed", "session_id": "s1"}),
             json!({"type": "end"}),
+        ],
+    );
+    assert_yaml_snapshot!(entries);
+}
+
+#[test]
+fn codex_reconnecting_terminal_error_without_progress_terminates_session() {
+    let entries = dispatch_events(
+        "codex",
+        vec![
+            json!({"type": "turn/started", "session_id": "s1"}),
+            json!({
+                "type": "error",
+                "message": "Reconnecting... exhausted retries"
+            }),
+        ],
+    );
+    assert_yaml_snapshot!(entries);
+}
+
+#[test]
+fn claude_reconnecting_error_terminates_session() {
+    let entries = dispatch_events(
+        "claude",
+        vec![
+            json!({
+                "type": "system",
+                "subtype": "init",
+                "session_id": "provider-1",
+                "uuid": "sys-1"
+            }),
+            json!({
+                "type": "error",
+                "message": "Reconnecting... provider failed",
+                "willRetry": true
+            }),
         ],
     );
     assert_yaml_snapshot!(entries);

@@ -124,6 +124,8 @@ async function driveToSendMessage(sessionId: string) {
 		activeRequestId: null,
 		activeEmitter: null,
 		notificationGate: null,
+		lastSentModel: "",
+		lastRetryAt: null,
 	});
 
 	const sendMessagePromise = manager.sendMessage(
@@ -277,6 +279,49 @@ describe("CodexAppServerManager.steer gate — real manager wiring", () => {
 		expect(idxSynthetic).toBe(-1);
 
 		await finish(fake, sendMessagePromise);
+	});
+
+	test("legacy retry window only suppresses reconnect notices", async () => {
+		const { manager, fake, events, sendMessagePromise, sessionId } =
+			await driveToSendMessage("s1");
+
+		// Simulate an older Codex app-server build: stderr already emitted a
+		// reconnect line, but the JSON-RPC error lacks structured willRetry.
+		// Only explicit reconnect progress should be suppressed; terminal
+		// provider errors inside that window must still surface immediately.
+		// biome-ignore lint/suspicious/noExplicitAny: inspect private sessions in regression test
+		(manager as any).sessions.get(sessionId).lastRetryAt = Date.now();
+
+		await fake.fireNotification("error", {
+			error: { message: "Reconnecting... 1/5" },
+		});
+		await new Promise((r) => setTimeout(r, 0));
+
+		const reconnectError = events.find(
+			(e) => (e as { type?: string }).type === "error",
+		);
+		expect(reconnectError).toBeUndefined();
+
+		await finish(fake, sendMessagePromise);
+	});
+
+	test("terminal errors emit inside a legacy retry window", async () => {
+		const { manager, fake, events, sendMessagePromise, sessionId } =
+			await driveToSendMessage("s1");
+
+		// biome-ignore lint/suspicious/noExplicitAny: inspect private sessions in regression test
+		(manager as any).sessions.get(sessionId).lastRetryAt = Date.now();
+
+		await fake.fireNotification("error", {
+			error: { message: "Reconnecting... exhausted retries" },
+		});
+		await sendMessagePromise;
+
+		expect(events).toContainEqual({
+			id: "stream-rid-1",
+			type: "error",
+			message: "Reconnecting... exhausted retries",
+		});
 	});
 
 	test("steady-state: notifications flow through when no steer is pending", async () => {

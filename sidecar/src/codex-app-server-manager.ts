@@ -36,10 +36,8 @@ import {
 
 const CODEX_BIN_PATH = process.env.HELMOR_CODEX_BIN_PATH || "codex";
 
-/** How long after a "Reconnecting…" stderr line we suppress
- *  {method:"error"} notifications from Codex. Covers a typical
- *  Azure OpenAI mini-outage; if the upstream is genuinely down for
- *  longer, the next stderr line resets the window. */
+/** How long after a "Reconnecting…" stderr line we keep emitting
+ *  synthetic heartbeats while Codex owns its retry loop. */
 const RETRY_SUPPRESSION_MS = 30_000;
 
 const HELMOR_CLIENT_INFO = {
@@ -66,6 +64,19 @@ function isRecoverableResumeError(err: unknown): boolean {
 			? err.message.toLowerCase()
 			: String(err).toLowerCase();
 	return RECOVERABLE_RESUME_SNIPPETS.some((s) => msg.includes(s));
+}
+
+function isLegacyReconnectNotice(message: string): boolean {
+	const trimmed = message.trimStart();
+	const prefix = trimmed.startsWith("Reconnecting...")
+		? "Reconnecting..."
+		: trimmed.startsWith("Reconnecting…")
+			? "Reconnecting…"
+			: null;
+	if (!prefix) return false;
+
+	const suffix = trimmed.slice(prefix.length).trimStart();
+	return suffix === "" || /^\d+\s*\/\s*\d+/.test(suffix);
 }
 
 // ---------------------------------------------------------------------------
@@ -322,16 +333,17 @@ export class CodexAppServerManager implements SessionManager {
 					const msg =
 						typeof nested === "string" ? nested : "Unknown Codex error";
 					// App-server protocol marks retryable stream errors with
-					// params.willRetry=true. Older builds also print
-					// "Reconnecting…" to stderr; keep that as a fallback only
-					// when the structured field is absent. If willRetry=false,
-					// the error is terminal even inside a recent stderr window.
+					// params.willRetry=true. Older builds omit the structured bit,
+					// so only suppress their explicit reconnect progress messages.
+					// A recent stderr reconnect line is liveness context, not proof
+					// that an arbitrary later error is retryable.
 					const willRetry = deepGet(n.params, "willRetry");
 					const lastRetry = ctx.lastRetryAt ?? 0;
 					const suppressForProtocolRetry = willRetry === true;
 					const suppressForLegacyRetryWindow =
 						typeof willRetry !== "boolean" &&
-						Date.now() - lastRetry < RETRY_SUPPRESSION_MS;
+						Date.now() - lastRetry < RETRY_SUPPRESSION_MS &&
+						isLegacyReconnectNotice(msg);
 					if (suppressForProtocolRetry || suppressForLegacyRetryWindow) {
 						emitter.heartbeat(requestId);
 						logger.info(

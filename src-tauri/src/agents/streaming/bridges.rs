@@ -172,7 +172,43 @@ pub(super) fn is_retryable_sidecar_error(raw: &Value) -> bool {
 
 fn is_reconnecting_notice(message: &str) -> bool {
     let message = message.trim_start();
-    message.starts_with("Reconnecting...") || message.starts_with("Reconnecting…")
+    let suffix = message
+        .strip_prefix("Reconnecting...")
+        .or_else(|| message.strip_prefix("Reconnecting…"));
+    let Some(suffix) = suffix else {
+        return false;
+    };
+    let suffix = suffix.trim_start();
+    suffix.is_empty() || starts_with_retry_count(suffix)
+}
+
+fn starts_with_retry_count(message: &str) -> bool {
+    let mut chars = message.chars().peekable();
+    if !consume_ascii_digits(&mut chars) {
+        return false;
+    }
+    while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+        chars.next();
+    }
+    if chars.next() != Some('/') {
+        return false;
+    }
+    while chars.peek().is_some_and(|c| c.is_ascii_whitespace()) {
+        chars.next();
+    }
+    consume_ascii_digits(&mut chars)
+}
+
+fn consume_ascii_digits<I>(chars: &mut std::iter::Peekable<I>) -> bool
+where
+    I: Iterator<Item = char>,
+{
+    let mut consumed = false;
+    while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+        consumed = true;
+        chars.next();
+    }
+    consumed
 }
 
 /// Pure constructor for `AgentStreamEvent::Error`. Caller decides
