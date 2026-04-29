@@ -539,17 +539,34 @@ fn error_event_terminates_session_with_internal_flag() {
 }
 
 #[test]
-fn retryable_sidecar_error_does_not_terminate_session() {
+fn structured_retryable_sidecar_error_does_not_terminate_session() {
     let entries = dispatch_events(
         "codex",
         vec![
             json!({"type": "turn/started", "session_id": "s1"}),
             json!({
                 "type": "error",
-                "message": "Reconnecting... 1/100"
+                "message": "Reconnecting... 1/100",
+                "willRetry": true
             }),
             json!({"type": "item/agentMessage/delta", "session_id": "s1", "delta": "Recovered"}),
             json!({"type": "turn/completed", "session_id": "s1"}),
+            json!({"type": "end"}),
+        ],
+    );
+    assert_yaml_snapshot!(entries);
+}
+
+#[test]
+fn codex_message_only_reconnect_error_then_end_preserves_error() {
+    let entries = dispatch_events(
+        "codex",
+        vec![
+            json!({"type": "turn/started", "session_id": "s1"}),
+            json!({
+                "type": "error",
+                "message": "Reconnecting... 1/5"
+            }),
             json!({"type": "end"}),
         ],
     );

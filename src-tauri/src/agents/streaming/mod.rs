@@ -384,10 +384,12 @@ pub(super) fn stream_via_sidecar(
                 continue;
             }
 
-            // Older sidecars forwarded Codex app-server retry notices as terminal
-            // `type:error` events after losing the structured `willRetry=true`
-            // bit. Treat those as liveness pings AND surface a non-terminal
-            // retry notice so the user does not see a long silent pause.
+            // Older sidecars may forward Codex app-server retry notices as
+            // `type:error` events while preserving the structured
+            // `willRetry=true` bit. Treat only those explicit retry markers as
+            // liveness pings; message-only errors are terminal and must not be
+            // converted into a successful `end` if the sidecar's finally block
+            // emits one immediately after.
             if model_copy.provider == "codex"
                 && event.event_type() == "error"
                 && bridges::is_retryable_sidecar_error(&event.raw)

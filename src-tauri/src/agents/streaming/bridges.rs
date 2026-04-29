@@ -153,11 +153,11 @@ pub fn bridge_user_input_request_event(
     }
 }
 
-/// True for sidecar `error` events that are retry progress notices rather
-/// than terminal failures. Newer sidecars suppress Codex app-server
-/// `willRetry=true` notifications before they reach Rust, but this guard keeps
-/// the stream alive if an older sidecar forwards the notice as a plain
-/// `type:error` message.
+/// True for sidecar `error` events that are explicitly marked as retry
+/// progress notices rather than terminal failures. Newer sidecars suppress
+/// Codex app-server `willRetry=true` notifications before they reach Rust, but
+/// this guard keeps the stream alive if an older sidecar forwards the
+/// structured notice as `type:error`.
 pub(super) fn is_retryable_sidecar_error(raw: &Value) -> bool {
     for key in ["willRetry", "will_retry"] {
         if let Some(will_retry) = raw.get(key).and_then(Value::as_bool) {
@@ -165,20 +165,19 @@ pub(super) fn is_retryable_sidecar_error(raw: &Value) -> bool {
         }
     }
 
-    raw.get("message")
-        .and_then(Value::as_str)
-        .is_some_and(is_reconnecting_notice)
+    false
 }
 
-/// Build a non-terminal pipeline event for a retryable sidecar error. This
-/// keeps older sidecars (which forwarded Codex reconnect progress as
-/// `type:error`) visible to the user without terminating the stream.
+/// Build a non-terminal pipeline event for a structured retryable sidecar
+/// error. This keeps older sidecars that forwarded Codex reconnect progress as
+/// `type:error` with `willRetry=true` visible to the user without terminating
+/// the stream.
 pub(super) fn retry_notice_event_from_error(raw: &Value) -> Value {
     let message = raw
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or("Retrying provider request");
-    let (attempt, max_retries) = reconnect_counts(message).unwrap_or((0, 0));
+    let (attempt, max_retries) = reconnect_counts_from_message(message).unwrap_or((0, 0));
 
     json!({
         "type": "system",
@@ -190,20 +189,12 @@ pub(super) fn retry_notice_event_from_error(raw: &Value) -> Value {
     })
 }
 
-fn is_reconnecting_notice(message: &str) -> bool {
+fn reconnect_counts_from_message(message: &str) -> Option<(u64, u64)> {
     let message = message.trim_start();
     let suffix = message
         .strip_prefix("Reconnecting...")
         .or_else(|| message.strip_prefix("Reconnecting…"));
-    let Some(suffix) = suffix else {
-        return false;
-    };
-    let suffix = suffix.trim_start();
-    suffix.is_empty() || starts_with_retry_count(suffix)
-}
-
-fn starts_with_retry_count(message: &str) -> bool {
-    reconnect_counts(message).is_some()
+    reconnect_counts(suffix.unwrap_or(message).trim_start())
 }
 
 fn reconnect_counts(message: &str) -> Option<(u64, u64)> {
