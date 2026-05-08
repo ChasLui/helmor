@@ -10,12 +10,10 @@
 // callback) breaks @cursor/sdk's local run-store, which silently hangs the
 // promise chain and prevents the agent stream from completing.
 
-"use strict";
-
-const { Database: BunDB } = require("bun:sqlite");
-const { existsSync, mkdirSync } = require("node:fs");
-const { dirname } = require("node:path");
-const EventEmitter = require("node:events");
+import { Database as BunDB } from "bun:sqlite";
+import EventEmitter from "node:events";
+import { existsSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 
 const isFn = (x) => typeof x === "function";
 const toError = (e) => (e instanceof Error ? e : new Error(String(e)));
@@ -304,5 +302,14 @@ const sqlite3 = {
 	OPEN_PRIVATECACHE: 0x40000,
 };
 
-module.exports = sqlite3;
-module.exports.default = sqlite3;
+export default sqlite3;
+export { Database, Statement };
+export const cached = sqlite3.cached;
+export const verbose = sqlite3.verbose;
+export const OPEN_READONLY = sqlite3.OPEN_READONLY;
+export const OPEN_READWRITE = sqlite3.OPEN_READWRITE;
+export const OPEN_CREATE = sqlite3.OPEN_CREATE;
+export const OPEN_FULLMUTEX = sqlite3.OPEN_FULLMUTEX;
+export const OPEN_URI = sqlite3.OPEN_URI;
+export const OPEN_SHAREDCACHE = sqlite3.OPEN_SHAREDCACHE;
+export const OPEN_PRIVATECACHE = sqlite3.OPEN_PRIVATECACHE;
