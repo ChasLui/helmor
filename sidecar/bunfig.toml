@@ -3,3 +3,6 @@
 # that `bun build --compile` produces. Compile-time plugins are wired
 # separately in scripts/build.ts.
 preload = ["./scripts/plugins/register-runtime.ts"]
+
+[test]
+preload = ["./scripts/plugins/register-runtime.ts"]
