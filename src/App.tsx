@@ -3377,6 +3377,10 @@ function AppShell({
 														workspaceState={
 															selectedWorkspaceDetailQuery.data?.state ?? null
 														}
+														workspaceSetupCompletedAt={
+															selectedWorkspaceDetailQuery.data
+																?.setupCompletedAt ?? null
+														}
 														repoId={
 															selectedWorkspaceDetailQuery.data?.repoId ?? null
 														}
