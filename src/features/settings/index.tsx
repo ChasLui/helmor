@@ -35,6 +35,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
 	Tooltip,
 	TooltipContent,
+	TooltipProvider,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { getShortcut } from "@/features/shortcuts/registry";
@@ -453,33 +454,41 @@ export const SettingsDialog = memo(function SettingsDialog({
 										title={
 											<span className="inline-flex items-center gap-1.5">
 												Claude Code Thinking Display
-												<Tooltip>
-													<TooltipTrigger asChild>
-														<HelpCircle
-															className="size-3 cursor-help text-muted-foreground/70"
-															strokeWidth={1.8}
-														/>
-													</TooltipTrigger>
-													<TooltipContent
-														side="top"
-														className="max-w-[320px] text-left"
-													>
-														<div className="space-y-1.5">
-															<div>
-																<span className="font-medium">Summarized</span>
-																{" — "}
-																thinking blocks contain summarized text.
+												{/* SettingsDialog renders outside AppShell's
+												 *  TooltipProvider tree, so panels need their
+												 *  own — same pattern as repository-settings /
+												 *  cursor-provider. */}
+												<TooltipProvider>
+													<Tooltip>
+														<TooltipTrigger asChild>
+															<HelpCircle
+																className="size-3 cursor-help text-muted-foreground/70"
+																strokeWidth={1.8}
+															/>
+														</TooltipTrigger>
+														<TooltipContent
+															side="top"
+															className="max-w-[320px] text-left"
+														>
+															<div className="space-y-1.5">
+																<div>
+																	<span className="font-medium">
+																		Summarized
+																	</span>
+																	{" — "}
+																	thinking blocks contain summarized text.
+																</div>
+																<div>
+																	<span className="font-medium">Omitted</span>
+																	{" — "}
+																	thinking blocks are empty. The server skips
+																	streaming thinking tokens, so the final text
+																	streams sooner. Reduces latency, not cost.
+																</div>
 															</div>
-															<div>
-																<span className="font-medium">Omitted</span>
-																{" — "}
-																thinking blocks are empty. The server skips
-																streaming thinking tokens, so the final text
-																streams sooner. Reduces latency, not cost.
-															</div>
-														</div>
-													</TooltipContent>
-												</Tooltip>
+														</TooltipContent>
+													</Tooltip>
+												</TooltipProvider>
 											</span>
 										}
 										description="Controls how Claude Code returns thinking content."
