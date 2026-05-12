@@ -56,7 +56,7 @@ import {
 import {
 	type PendingArchiveEntry,
 	type PendingCreationEntry,
-	projectSidebarLists,
+	projectVisualSidebar,
 	shouldReconcilePendingArchive,
 	shouldReconcilePendingCreation,
 } from "../sidebar-projection";
@@ -162,20 +162,29 @@ export function useWorkspacesSidebarController({
 	const baseArchivedSummaries = archivedQuery.data ?? [];
 	const projectedSidebar = useMemo(
 		() =>
-			projectSidebarLists({
-				baseGroups,
-				baseArchivedSummaries,
-				pendingArchives,
-				pendingCreations: new Map(
-					Array.from(pendingCreations.entries()).map(
-						([workspaceId, pendingCreation]) => [
-							workspaceId,
-							pendingCreation.entry,
-						],
+			projectVisualSidebar(
+				{
+					baseGroups,
+					baseArchivedSummaries,
+					pendingArchives,
+					pendingCreations: new Map(
+						Array.from(pendingCreations.entries()).map(
+							([workspaceId, pendingCreation]) => [
+								workspaceId,
+								pendingCreation.entry,
+							],
+						),
 					),
-				),
-			}),
-		[baseArchivedSummaries, baseGroups, pendingArchives, pendingCreations],
+				},
+				settings.sidebarGrouping,
+			),
+		[
+			baseArchivedSummaries,
+			baseGroups,
+			pendingArchives,
+			pendingCreations,
+			settings.sidebarGrouping,
+		],
 	);
 	const groups = projectedSidebar.groups;
 	const archivedSummaries = useMemo(
@@ -1361,22 +1370,32 @@ export function useWorkspacesSidebarController({
 					optimisticGroups,
 				);
 
-				const optimisticArchived = projectSidebarLists({
-					baseGroups: optimisticGroups,
-					baseArchivedSummaries,
-					pendingArchives: new Map([
-						...pendingArchives,
-						[workspaceId, pendingArchive],
-					]),
-					pendingCreations: new Map(
-						Array.from(pendingCreations.entries()).map(
-							([optimisticWorkspaceId, pendingCreation]) => [
-								optimisticWorkspaceId,
-								pendingCreation.entry,
-							],
+				// Project the post-archive snapshot through the same visual
+				// pipeline used for the live sidebar so the replacement search
+				// below compares apples to apples — without this, repo-mode
+				// flattens the "before" view by repo bucket and the "after"
+				// view by status bucket, and selection jumps to whichever
+				// workspace happens to share the removed row's flat index in
+				// the wrong layout.
+				const optimisticVisual = projectVisualSidebar(
+					{
+						baseGroups: optimisticGroups,
+						baseArchivedSummaries,
+						pendingArchives: new Map([
+							...pendingArchives,
+							[workspaceId, pendingArchive],
+						]),
+						pendingCreations: new Map(
+							Array.from(pendingCreations.entries()).map(
+								([optimisticWorkspaceId, pendingCreation]) => [
+									optimisticWorkspaceId,
+									pendingCreation.entry,
+								],
+							),
 						),
-					),
-				});
+					},
+					settings.sidebarGrouping,
+				);
 				const shouldNavigate =
 					!selectedWorkspaceId || selectedWorkspaceId === workspaceId;
 				if (shouldNavigate) {
@@ -1386,8 +1405,8 @@ export function useWorkspacesSidebarController({
 						const nextWorkspaceId = findReplacementWorkspaceIdAfterRemoval({
 							currentGroups: groups,
 							currentArchivedRows: archivedRows,
-							nextGroups: optimisticGroups,
-							nextArchivedRows: optimisticArchived.archivedRows,
+							nextGroups: optimisticVisual.groups,
+							nextArchivedRows: optimisticVisual.archivedRows,
 							removedWorkspaceId: workspaceId,
 						});
 						if (nextWorkspaceId) {
@@ -1411,6 +1430,7 @@ export function useWorkspacesSidebarController({
 			})();
 		},
 		[
+			archivedRows,
 			archiveGate,
 			archivingWorkspaceIds,
 			baseArchivedSummaries,
@@ -1418,12 +1438,14 @@ export function useWorkspacesSidebarController({
 			onSelectWorkspace,
 			onOpenNewWorkspace,
 			pendingArchives,
+			pendingCreations,
 			prefetchWorkspace,
 			pushWorkspaceErrorToast,
 			pushWorkspaceToast,
 			queryClient,
 			rollbackArchivedWorkspace,
 			selectedWorkspaceId,
+			settings.sidebarGrouping,
 			updateArchivingWorkspaceId,
 		],
 	);
@@ -1504,9 +1526,19 @@ export function useWorkspacesSidebarController({
 					: current,
 			);
 
-			prefetchWorkspace(workspaceId);
-			onSelectWorkspace(workspaceId);
-
+			// Defer prefetch + selection until backend restore completes.
+			// The sidebar row already moved to its target group via the
+			// optimistic cache writes above (and shows a spinner via
+			// `restoringWorkspaceId`), so the user gets immediate visual
+			// feedback. Selecting before restore_impl finishes triggers a
+			// fan-out of queries against a still-archived workspace — git
+			// status against a missing worktree, slash-command prewarm
+			// that spawns a fresh `claude-code` subprocess (~4s),
+			// per-workspace fetch, forge HTTP, avatar lookup — and that
+			// fan-out is what freezes the webview for several seconds.
+			// Waiting until the worktree exists means every downstream
+			// query sees a real workspace and resolves in a single
+			// frame's worth of work.
 			void restoreWorkspace(workspaceId, targetBranchOverride)
 				.then(async (response) => {
 					await Promise.all([
@@ -1517,6 +1549,8 @@ export function useWorkspacesSidebarController({
 							queryKey: helmorQueryKeys.workspaceSessions(workspaceId),
 						}),
 					]);
+					prefetchWorkspace(workspaceId);
+					onSelectWorkspace(workspaceId);
 					if (response.branchRename) {
 						notifyBranchRename(response.branchRename);
 					}
@@ -1597,6 +1631,7 @@ export function useWorkspacesSidebarController({
 		creatingWorkspaceRepoId,
 		cloneDefaultDirectory,
 		groups,
+		sidebarGrouping: settings.sidebarGrouping,
 		handleAddRepository,
 		handleArchiveWorkspace,
 		handleCloneFromUrl,

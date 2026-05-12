@@ -26,6 +26,11 @@ export type ContextPanelState = {
 export type ContextPanelActions = {
 	setInspectorCollapsed: Dispatch<SetStateAction<boolean>>;
 	toggleContextPanel(): void;
+	// Idempotent: snap the right sidebar to a specific mode and uncollapse
+	// it when switching to "context". Used by deep links (release toast
+	// actions etc.) where toggleContextPanel's "flip" semantics aren't
+	// right — the caller knows exactly which mode it wants.
+	setMode(mode: WorkspaceRightSidebarMode): void;
 	openWorkspaceContextCard(card: ContextCard): void;
 	selectWorkspaceContextPreview(): void;
 	closeWorkspaceContextPreview(): void;
@@ -127,6 +132,22 @@ export function useContextPanelController(
 
 	useShellEvent("toggle-context-panel", toggleContextPanel);
 
+	const setMode = useCallback(
+		(mode: WorkspaceRightSidebarMode) => {
+			const viewMode = getViewModeRef.current();
+			setRightSidebarMode(mode);
+			if (mode === "context") {
+				setInspectorCollapsed(false);
+			}
+			if (viewMode === "start") {
+				void updateSettings({ startContextPanelOpen: mode === "context" });
+			} else {
+				void updateSettings({ workspaceRightSidebarMode: mode });
+			}
+		},
+		[getViewModeRef, updateSettings],
+	);
+
 	const openWorkspaceContextCard = useCallback((card: ContextCard) => {
 		setWorkspacePreviewCard(card);
 		setWorkspacePreviewActive(true);
@@ -185,6 +206,7 @@ export function useContextPanelController(
 	const actions = useStableActions<ContextPanelActions>({
 		setInspectorCollapsed,
 		toggleContextPanel,
+		setMode,
 		openWorkspaceContextCard,
 		selectWorkspaceContextPreview,
 		closeWorkspaceContextPreview,

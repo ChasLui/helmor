@@ -159,6 +159,7 @@ function makeArchivedSummary(id: string): WorkspaceSummary {
 		id,
 		title: `Archived ${id}`,
 		directoryName: id,
+		repoId: "repo-1",
 		repoName: "helmor",
 		repoInitials: "HE",
 		state: "archived",

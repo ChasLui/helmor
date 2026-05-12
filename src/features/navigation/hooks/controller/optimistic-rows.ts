@@ -25,6 +25,7 @@ export function createPreparedWorkspaceRow(
 		// already in its terminal shape — no placeholder → real swap.
 		title: `${repository.name} workspace`,
 		directoryName: prepared.directoryName,
+		repoId: repository.id,
 		repoName: repository.name,
 		repoIconSrc: repository.repoIconSrc ?? null,
 		repoInitials: repository.repoInitials ?? null,

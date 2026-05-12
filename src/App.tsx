@@ -11,6 +11,10 @@ import { QuitConfirmDialog } from "@/components/quit-confirm-dialog";
 import { SplashScreen } from "@/components/splash-screen";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import {
+	GITHUB_RELEASES_URL,
+	ReleaseAnnouncementToastHost,
+} from "@/features/announcements";
 import type { WorkspaceCommitButtonMode } from "@/features/commit/button";
 import { useWorkspaceCommitLifecycle } from "@/features/commit/hooks/use-commit-lifecycle";
 import { hydrateDraftCache } from "@/features/composer/draft-storage";
@@ -22,6 +26,7 @@ import {
 import { useDockUnreadBadge } from "@/features/dock-badge";
 import { WorkspaceEditorSurface } from "@/features/editor";
 import { useRefreshForgeOnWorkspaceSwitch } from "@/features/inspector/hooks/use-refresh-forge-on-switch";
+import { regroupByRepo } from "@/features/navigation/sidebar-projection";
 import { AppOnboarding } from "@/features/onboarding";
 import { seedNewSessionInCache } from "@/features/panel/session-cache";
 import { useConfirmSessionClose } from "@/features/panel/use-confirm-session-close";
@@ -229,8 +234,12 @@ function MainApp() {
 						 *  stuck on "Connect" indefinitely. */}
 						<ForgeAccountsHealthSentinel />
 						<AppShell
-							onOpenSettings={(workspaceId, workspaceRepoId) => {
-								setSettingsInitialSection(undefined);
+							onOpenSettings={(
+								workspaceId,
+								workspaceRepoId,
+								initialSection,
+							) => {
+								setSettingsInitialSection(initialSection);
 								setSettingsWorkspaceId(workspaceId);
 								setSettingsWorkspaceRepoId(workspaceRepoId);
 								setSettingsOpen(true);
@@ -262,6 +271,7 @@ function AppShell({
 	onOpenSettings: (
 		workspaceId: string | null,
 		workspaceRepoId: string | null,
+		initialSection?: SettingsSection,
 	) => void;
 }) {
 	useZoom();
@@ -340,7 +350,20 @@ function AppShell({
 	} = useSettings();
 	const navigationGroupsQuery = useQuery(workspaceGroupsQueryOptions());
 	const navigationArchivedQuery = useQuery(archivedWorkspacesQueryOptions());
-	const workspaceGroups = navigationGroupsQuery.data ?? [];
+	const baseWorkspaceGroups = navigationGroupsQuery.data ?? [];
+	// Project the raw status-grouped query result through the same
+	// repo-bucketing step the sidebar applies for rendering, so callers
+	// downstream (selection controller's keyboard navigation, workspace
+	// warmup) see groups in the order the user actually sees them on
+	// screen. Without this, repo grouping mode keeps the raw status
+	// buckets and up/down keys jump in seemingly random order.
+	const workspaceGroups = useMemo(
+		() =>
+			appSettings.sidebarGrouping === "repo"
+				? regroupByRepo(baseWorkspaceGroups)
+				: baseWorkspaceGroups,
+		[appSettings.sidebarGrouping, baseWorkspaceGroups],
+	);
 	const archivedRows = useMemo(
 		() => (navigationArchivedQuery.data ?? []).map(summaryToArchivedRow),
 		[navigationArchivedQuery.data],
@@ -576,6 +599,19 @@ function AppShell({
 		selectedWorkspaceDetailQuery.data?.repoId,
 		selectedWorkspaceId,
 	]);
+	const handleOpenAnnouncementSettings = useCallback(
+		(initialSection?: SettingsSection): void => {
+			onOpenSettings(null, null, initialSection);
+		},
+		[onOpenSettings],
+	);
+	const handleOpenReleaseChangelog = useCallback(() => {
+		void openUrl(GITHUB_RELEASES_URL).catch((error) => {
+			toast.error("Unable to open GitHub changelog", {
+				description: String(error),
+			});
+		});
+	}, []);
 	const selectedWorkspaceDetail =
 		selectedWorkspaceDetailQuery.data ??
 		(selectedWorkspaceId
@@ -1572,6 +1608,11 @@ function AppShell({
 							theme={resolveTheme(appSettings.theme)}
 							position="bottom-right"
 							visibleToasts={6}
+						/>
+						<ReleaseAnnouncementToastHost
+							onOpenChangelog={handleOpenReleaseChangelog}
+							onOpenSettings={handleOpenAnnouncementSettings}
+							onSetRightSidebarMode={contextPanelActions.setMode}
 						/>
 						{closeConfirmDialog}
 					</ComposerInsertProvider>
