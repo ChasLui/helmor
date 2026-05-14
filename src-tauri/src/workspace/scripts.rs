@@ -912,6 +912,8 @@ mod tests {
             workspace_path: None,
             workspace_name: None,
             default_branch: None,
+            port_base: None,
+            port_count: None,
         };
         let key: ProcessKey = ("repo".into(), "run".into(), Some("ws".into()));
 
