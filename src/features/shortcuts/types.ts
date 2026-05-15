@@ -5,6 +5,7 @@ export type ShortcutId =
 	| "workspace.quickSwitchPrevious"
 	| "workspace.new"
 	| "workspace.addRepository"
+	| "workspace.filterSidebar"
 	| "workspace.copyPath"
 	| "workspace.openInEditor"
 	| "session.previous"

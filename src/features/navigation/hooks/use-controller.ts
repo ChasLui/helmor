@@ -108,7 +108,7 @@ export function useWorkspacesSidebarController({
 	pushWorkspaceToast,
 }: UseWorkspacesSidebarControllerArgs) {
 	const queryClient = useQueryClient();
-	const { settings } = useSettings();
+	const { settings, updateSettings } = useSettings();
 	const [addingRepository, setAddingRepository] = useState(false);
 	const [isCloneDialogOpen, setIsCloneDialogOpen] = useState(false);
 	const [cloneDefaultDirectory, setCloneDefaultDirectory] = useState<
@@ -165,6 +165,10 @@ export function useWorkspacesSidebarController({
 
 	const baseGroups = groupsQuery.data ?? [];
 	const baseArchivedSummaries = archivedQuery.data ?? [];
+	const availableRepoIds = useMemo(
+		() => (repositoriesQuery.data ?? []).map((repository) => repository.id),
+		[repositoriesQuery.data],
+	);
 	const projectedSidebar = useMemo(
 		() =>
 			projectVisualSidebar(
@@ -182,13 +186,21 @@ export function useWorkspacesSidebarController({
 					),
 				},
 				settings.sidebarGrouping,
+				{
+					availableRepoIds,
+					repoFilterIds: settings.sidebarRepoFilterIds,
+					sort: settings.sidebarSort,
+				},
 			),
 		[
+			availableRepoIds,
 			baseArchivedSummaries,
 			baseGroups,
 			pendingArchives,
 			pendingCreations,
 			settings.sidebarGrouping,
+			settings.sidebarRepoFilterIds,
+			settings.sidebarSort,
 		],
 	);
 	const groups = projectedSidebar.groups;
@@ -1714,6 +1726,9 @@ export function useWorkspacesSidebarController({
 		cloneDefaultDirectory,
 		groups,
 		sidebarGrouping: settings.sidebarGrouping,
+		sidebarRepoFilterIds: settings.sidebarRepoFilterIds,
+		sidebarSort: settings.sidebarSort,
+		updateSettings,
 		handleAddRepository,
 		handleArchiveWorkspace,
 		handleCloneFromUrl,

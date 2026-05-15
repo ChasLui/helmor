@@ -26,7 +26,10 @@ import {
 import { useDockUnreadBadge } from "@/features/dock-badge";
 import { WorkspaceEditorSurface } from "@/features/editor";
 import { useRefreshForgeOnWorkspaceSwitch } from "@/features/inspector/hooks/use-refresh-forge-on-switch";
-import { regroupByRepo } from "@/features/navigation/sidebar-projection";
+import {
+	applySidebarView,
+	regroupByRepo,
+} from "@/features/navigation/sidebar-projection";
 import { AppOnboarding } from "@/features/onboarding";
 import { seedNewSessionInCache } from "@/features/panel/session-cache";
 import { useConfirmSessionClose } from "@/features/panel/use-confirm-session-close";
@@ -370,28 +373,48 @@ function AppShell({
 	const navigationGroupsQuery = useQuery(workspaceGroupsQueryOptions());
 	const navigationArchivedQuery = useQuery(archivedWorkspacesQueryOptions());
 	const baseWorkspaceGroups = navigationGroupsQuery.data ?? [];
+	const repositoriesQuery = useQuery(repositoriesQueryOptions());
+	const repositories = repositoriesQuery.data ?? [];
+	const availableRepoIds = useMemo(
+		() => repositories.map((repository) => repository.id),
+		[repositories],
+	);
+	const rawArchivedRows = useMemo(
+		() => (navigationArchivedQuery.data ?? []).map(summaryToArchivedRow),
+		[navigationArchivedQuery.data],
+	);
 	// Project the raw status-grouped query result through the same
 	// repo-bucketing step the sidebar applies for rendering, so callers
 	// downstream (selection controller's keyboard navigation, workspace
 	// warmup) see groups in the order the user actually sees them on
 	// screen. Without this, repo grouping mode keeps the raw status
 	// buckets and up/down keys jump in seemingly random order.
-	const workspaceGroups = useMemo(
-		() =>
+	const navigationSidebar = useMemo(() => {
+		const groups =
 			appSettings.sidebarGrouping === "repo"
 				? regroupByRepo(baseWorkspaceGroups)
-				: baseWorkspaceGroups,
-		[appSettings.sidebarGrouping, baseWorkspaceGroups],
-	);
-	const archivedRows = useMemo(
-		() => (navigationArchivedQuery.data ?? []).map(summaryToArchivedRow),
-		[navigationArchivedQuery.data],
-	);
+				: baseWorkspaceGroups;
+		return applySidebarView(
+			{ groups, archivedRows: rawArchivedRows },
+			{
+				availableRepoIds,
+				repoFilterIds: appSettings.sidebarRepoFilterIds,
+				sort: appSettings.sidebarSort,
+			},
+		);
+	}, [
+		appSettings.sidebarGrouping,
+		appSettings.sidebarRepoFilterIds,
+		appSettings.sidebarSort,
+		availableRepoIds,
+		baseWorkspaceGroups,
+		rawArchivedRows,
+	]);
+	const workspaceGroups = navigationSidebar.groups;
+	const archivedRows = navigationSidebar.archivedRows;
 	// MRU stack of workspace ids — drives Ctrl+Tab quick switch order.
 	// In-memory only; resets on app restart by design.
 	const workspaceMruRef = useRef<WorkspaceMruStack>(new WorkspaceMruStack());
-	const repositoriesQuery = useQuery(repositoriesQueryOptions());
-	const repositories = repositoriesQuery.data ?? [];
 	const { state: selection, actions: selectionActions } =
 		useSelectionController({
 			queryClient,
@@ -567,6 +590,10 @@ function AppShell({
 	const addRepositoryShortcut = getShortcut(
 		appSettings.shortcuts,
 		"workspace.addRepository",
+	);
+	const sidebarFilterShortcut = getShortcut(
+		appSettings.shortcuts,
+		"workspace.filterSidebar",
 	);
 	const leftSidebarToggleShortcut = getShortcut(
 		appSettings.shortcuts,
@@ -1085,6 +1112,10 @@ function AppShell({
 				callback: () => publishShellEvent({ type: "open-add-repository" }),
 			},
 			{
+				id: "workspace.filterSidebar" as const,
+				callback: () => publishShellEvent({ type: "open-sidebar-filter" }),
+			},
+			{
 				id: "workspace.previous" as const,
 				callback: () => handleNavigateWorkspaces(-1),
 			},
@@ -1392,6 +1423,7 @@ function AppShell({
 											}
 											newWorkspaceShortcut={newWorkspaceShortcut}
 											addRepositoryShortcut={addRepositoryShortcut}
+											sidebarFilterShortcut={sidebarFilterShortcut}
 											leftSidebarToggleShortcut={leftSidebarToggleShortcut}
 											appUpdateStatus={appUpdateStatus}
 											appSettings={appSettings}
