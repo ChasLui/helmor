@@ -970,7 +970,7 @@ function ProgressiveConversationViewport({
 					return (
 						<MeasuredConversationRow
 							key={row.key}
-							disableContentVisibility={isTauri}
+							disableContentVisibility={isStreamingMessage}
 							onDomMount={
 								isStreamingMessage ? handleStreamingRowMount : undefined
 							}

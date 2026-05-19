@@ -7,10 +7,6 @@ import {
 	useState,
 } from "react";
 import {
-	suspendTerminalFit,
-	suspendTerminalWrites,
-} from "@/components/terminal-output";
-import {
 	clampSidebarWidth,
 	getInitialSidebarWidth,
 	INSPECTOR_WIDTH_STORAGE_KEY,
@@ -125,10 +121,6 @@ export function useShellPanels() {
 		}
 
 		setResizingActive(true);
-		// Pause xterm fit + writes so a live run script doesn't thrash the
-		// main thread mid-drag. Released on mouseup.
-		const releaseFitSuspend = suspendTerminalFit();
-		const releaseWriteSuspend = suspendTerminalWrites();
 
 		let pendingWidth: number | null = null;
 		let rafId: number | null = null;
@@ -185,8 +177,6 @@ export function useShellPanels() {
 				window.cancelAnimationFrame(rafId);
 			}
 			setResizingActive(false);
-			releaseFitSuspend();
-			releaseWriteSuspend();
 			document.body.style.cursor = previousCursor;
 			document.body.style.userSelect = previousUserSelect;
 			window.removeEventListener("mousemove", handleMouseMove);

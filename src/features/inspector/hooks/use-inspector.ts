@@ -423,8 +423,8 @@ export function useWorkspaceInspectorSidebar({
 		}
 
 		isResizingRef.current = true;
-		// Pause xterm fit + writes so a live run script doesn't thrash the
-		// main thread mid-drag. Released on mouseup.
+		// Vertical section resize can pause terminal work; horizontal shell
+		// resize stays live so the sidebar never appears frozen.
 		const releaseFitSuspend = suspendTerminalFit();
 		const releaseWriteSuspend = suspendTerminalWrites();
 
