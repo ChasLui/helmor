@@ -14,8 +14,6 @@
 //! implementation swaps behind — consumers depend on these signatures,
 //! not on `search.messages`.
 
-use std::collections::BTreeSet;
-
 use anyhow::Result;
 use chrono::{Duration, Utc};
 
@@ -89,26 +87,43 @@ pub fn mentions(
     }
 }
 
-/// Channel ids I'm "involved" in over the cold-start window: channels I
-/// was @ed in OR posted in. Two `search.messages` queries; each failure
-/// degrades independently. DMs (discovered separately) are unaffected.
-pub fn involved_channels(
+/// One involvement hit from `search.messages`. `is_mention` distinguishes the
+/// `<@me>` query (a real mention of me — an anchor candidate) from the
+/// `from:<@me>` query (my own post — context, not an anchor).
+#[derive(Debug, Clone)]
+pub struct MentionHit {
+    pub channel_id: String,
+    pub ts: String,
+    pub thread_ts: Option<String>,
+    pub text: String,
+    pub is_mention: bool,
+}
+
+/// Like [`involved_channels`] but returns the matched hits (ts / thread_ts /
+/// text), not just channel ids — so triage can expand the exact thread and
+/// guarantee the mention surfaces, instead of discarding the hits and
+/// re-fetching the channel timeline (which omits thread replies). Same two
+/// queries, same degraded/auth contract.
+pub fn involved_channel_hits(
     creds: &SlackCreds,
     my_user_id: &str,
     cold_start_days: i64,
-) -> Result<Outcome<BTreeSet<String>>> {
+) -> Result<Outcome<Vec<MentionHit>>> {
     let after = (Utc::now() - Duration::days(cold_start_days))
         .format("%Y-%m-%d")
         .to_string();
-    let queries = [
-        ("mention", format!("<@{my_user_id}> after:{after}")),
-        ("from-me", format!("from:<@{my_user_id}> after:{after}")),
-    ];
-    let mut channels = BTreeSet::new();
+    let mut hits: Vec<MentionHit> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
-    for (label, query) in queries {
+    for (label, query, is_mention) in [
+        ("mention", format!("<@{my_user_id}> after:{after}"), true),
+        (
+            "from-me",
+            format!("from:<@{my_user_id}> after:{after}"),
+            false,
+        ),
+    ] {
         match api::search_messages(creds, &query, 1, SearchSort::Timestamp) {
-            Ok(page) => collect_channel_ids(&page.matches, &mut channels),
+            Ok(page) => collect_hits(&page.matches, is_mention, &mut hits),
             Err(error) => {
                 if api::is_invalid_auth(&error) {
                     return Err(error);
@@ -118,10 +133,10 @@ pub fn involved_channels(
         }
     }
     if failures.is_empty() {
-        Ok(Outcome::ok(channels))
+        Ok(Outcome::ok(hits))
     } else {
         Ok(Outcome::degraded(
-            channels,
+            hits,
             format!("channel discovery degraded ({})", failures.join("; ")),
         ))
     }
@@ -156,14 +171,21 @@ pub fn unread_dms(creds: &SlackCreds) -> Result<Outcome<Vec<ConversationRow>>> {
     }
 }
 
-/// Union the channel ids carried in a batch of `search.messages` hits.
-fn collect_channel_ids(matches: &[RawMessage], into: &mut BTreeSet<String>) {
+fn collect_hits(matches: &[RawMessage], is_mention: bool, into: &mut Vec<MentionHit>) {
     for hit in matches {
-        if let Some(channel) = hit.channel.as_ref() {
-            if !channel.id.is_empty() {
-                into.insert(channel.id.clone());
-            }
+        let Some(channel) = hit.channel.as_ref() else {
+            continue;
+        };
+        if channel.id.is_empty() || hit.ts.is_empty() {
+            continue;
         }
+        into.push(MentionHit {
+            channel_id: channel.id.clone(),
+            ts: hit.ts.clone(),
+            thread_ts: hit.thread_ts.clone(),
+            text: api::extract_display_text(hit),
+            is_mention,
+        });
     }
 }
 
@@ -172,26 +194,22 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn match_in_channel(channel_id: &str) -> RawMessage {
-        serde_json::from_value(json!({
-            "ts": "1700000000.000100",
-            "channel": { "id": channel_id, "name": "eng" },
-        }))
-        .expect("valid RawMessage")
-    }
-
     #[test]
-    fn collect_channel_ids_dedups_and_skips_empty() {
-        let matches = vec![
-            match_in_channel("C1"),
-            match_in_channel("C1"),
-            match_in_channel("C2"),
-            match_in_channel(""),
-        ];
-        let mut into = BTreeSet::new();
-        collect_channel_ids(&matches, &mut into);
-        assert_eq!(into.len(), 2);
-        assert!(into.contains("C1") && into.contains("C2"));
+    fn collect_hits_captures_ts_thread_and_mention_flag() {
+        let raw: RawMessage = serde_json::from_value(json!({
+            "ts": "1700000000.000500",
+            "thread_ts": "1700000000.000100",
+            "text": "hi <@U_me>",
+            "channel": { "id": "C9", "name": "eng" },
+        }))
+        .expect("valid RawMessage");
+        let mut into = Vec::new();
+        collect_hits(&[raw], true, &mut into);
+        assert_eq!(into.len(), 1);
+        assert_eq!(into[0].channel_id, "C9");
+        assert_eq!(into[0].ts, "1700000000.000500");
+        assert_eq!(into[0].thread_ts.as_deref(), Some("1700000000.000100"));
+        assert!(into[0].is_mention);
     }
 
     #[test]
