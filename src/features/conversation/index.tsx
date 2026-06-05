@@ -88,6 +88,7 @@ export type WorkspaceConversationContainerProps = {
 	sessionSelectionHistory?: string[];
 	onSelectSession: (sessionId: string | null) => void;
 	onResolveDisplayedSession: (sessionId: string | null) => void;
+	onSelectWorkspace?: (workspaceId: string) => void;
 	onInteractionSessionsChange?: (
 		sessionWorkspaceMap: Map<string, string>,
 		interactionCounts: Map<string, number>,
@@ -183,6 +184,7 @@ export const WorkspaceConversationContainer = memo(
 		sessionSelectionHistory = [],
 		onSelectSession,
 		onResolveDisplayedSession,
+		onSelectWorkspace,
 		onInteractionSessionsChange,
 		activeStreams,
 		busySessionIds,
@@ -574,6 +576,7 @@ export const WorkspaceConversationContainer = memo(
 						modelSelections={composerModelSelections}
 						workspaceChangeRequest={workspaceChangeRequest}
 						onSelectSession={onSelectSession}
+						onSelectWorkspace={onSelectWorkspace}
 						onResolveDisplayedSession={onResolveDisplayedSession}
 						onQueuePendingPromptForSession={onQueuePendingPromptForSession}
 						onRequestCloseSession={onRequestCloseSession}
