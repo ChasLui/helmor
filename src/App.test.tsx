@@ -27,10 +27,14 @@ const INSPECTOR_WIDTH_STORAGE_KEY = "helmor.workspaceInspectorWidth";
 // WebKit subtree-wide style invalidation. The test reads back the same inline
 // width to confirm React state → inline-style sync via `useLayoutEffect`.
 function getPaneInlineWidth(target: "sidebar" | "inspector"): string {
+	return getPaneElement(target)?.style.width ?? "";
+}
+
+function getPaneElement(target: "sidebar" | "inspector"): HTMLElement | null {
 	const pane = document.querySelector(
 		`[data-shell-pane="${target}"]`,
 	) as HTMLElement | null;
-	return pane?.style.width ?? "";
+	return pane;
 }
 
 describe("App", () => {
@@ -82,7 +86,7 @@ describe("App", () => {
 		);
 
 		expect(shell).toHaveClass("bg-background");
-		expect(shell).toHaveClass("h-screen");
+		expect(shell).toHaveClass("h-dvh");
 		expect(shell).toHaveClass("overflow-hidden");
 		expect(sidebar).toHaveClass("bg-sidebar");
 		expect(sidebar).toHaveClass("overflow-hidden");
@@ -121,6 +125,7 @@ describe("App", () => {
 		expect(inspectorResizeHandle).toHaveStyle({ width: "20px" });
 		expect(inspectorResizeHandle.style.right).toBe("316px");
 		expect(safeAreas).toHaveLength(1);
+		expect(safeAreas[0]).toHaveClass("max-[960px]:hidden");
 		expect(groupsScrollRegion).toHaveClass("overflow-y-auto");
 		expect(groupsScrollRegion).toHaveClass("flex-1");
 		expect(screen.getByText("Workspaces")).toBeInTheDocument();
@@ -258,6 +263,102 @@ describe("App", () => {
 		});
 
 		expect(window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY)).toBe("360");
+	});
+
+	it("hides the mini-window resize entry from shell chrome", async () => {
+		render(<App />);
+		await screen.findByRole("main", { name: "Application shell" });
+
+		expect(
+			screen.queryByRole("button", { name: "Resize window" }),
+		).not.toBeInTheDocument();
+	});
+
+	it("uses responsive floating sidebars instead of mini-mode layout state", async () => {
+		render(<App />);
+		await screen.findByRole("main", { name: "Application shell" });
+		const sidebar = getPaneElement("sidebar");
+		const inspector = getPaneElement("inspector");
+		const sidebarInner = document.querySelector(
+			'[data-shell-pane-inner="sidebar"]',
+		);
+		const inspectorInner = document.querySelector(
+			'[data-shell-pane-inner="inspector"]',
+		);
+		const sidebarHover = document.querySelector(
+			'[data-shell-pane-hover="sidebar"]',
+		);
+		const inspectorHover = document.querySelector(
+			'[data-shell-pane-hover="inspector"]',
+		);
+
+		expect(sidebar).toHaveClass(
+			"max-[960px]:absolute",
+			"max-[960px]:top-9",
+			"max-[960px]:bottom-[18px]",
+			"max-[960px]:h-auto",
+			"max-[960px]:left-0",
+			"max-[960px]:!w-6",
+			"max-[960px]:rounded-xl",
+			"max-[960px]:overflow-visible",
+		);
+		expect(inspector).toHaveClass(
+			"max-[960px]:absolute",
+			"max-[960px]:top-9",
+			"max-[960px]:bottom-[18px]",
+			"max-[960px]:h-auto",
+			"max-[960px]:right-0",
+			"max-[960px]:!w-6",
+			"max-[960px]:rounded-xl",
+			"max-[960px]:overflow-visible",
+		);
+		expect(sidebarHover).toHaveClass(
+			"max-[960px]:absolute",
+			"max-[960px]:left-0",
+			"max-[960px]:!w-6",
+			"max-[960px]:overflow-visible",
+			"max-[960px]:pointer-events-auto",
+		);
+		expect(inspectorHover).toHaveClass(
+			"max-[960px]:absolute",
+			"max-[960px]:right-0",
+			"max-[960px]:!w-6",
+			"max-[960px]:overflow-visible",
+			"max-[960px]:pointer-events-auto",
+		);
+		expect(
+			screen.getByRole("button", { name: "Collapse left sidebar" }),
+		).toHaveClass("max-[960px]:hidden");
+		expect(
+			screen.getByRole("separator", { name: "Resize sidebar" }),
+		).toHaveClass("max-[960px]:hidden");
+		expect(
+			screen.getByRole("separator", { name: "Resize inspector sidebar" }),
+		).toHaveClass("max-[960px]:hidden");
+
+		expect(sidebarInner).toHaveClass(
+			"max-[960px]:ml-3",
+			"max-[960px]:!w-[320px]",
+			"max-[960px]:-translate-x-full",
+			"max-[960px]:will-change-transform",
+			"max-[960px]:opacity-0",
+		);
+		expect(inspectorInner).toHaveClass(
+			"max-[960px]:mr-3",
+			"max-[960px]:!w-[320px]",
+			"max-[960px]:translate-x-full",
+			"max-[960px]:will-change-transform",
+			"max-[960px]:opacity-0",
+		);
+		expect(
+			document.querySelector('[data-mini-sidebar-reveal="left"]'),
+		).not.toBeInTheDocument();
+		expect(
+			document.querySelector('[data-mini-sidebar-reveal="right"]'),
+		).not.toBeInTheDocument();
+		expect(sidebar).toHaveClass("max-[960px]:absolute");
+		expect(inspector).toHaveClass("max-[960px]:absolute");
+		expect(screen.getByLabelText("Workspace panel")).toHaveClass("flex-1");
 	});
 
 	it("resizes the inspector sidebar and persists the width", async () => {

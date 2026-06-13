@@ -11,20 +11,22 @@
 import { createInterface } from "node:readline";
 import type { PermissionUpdate } from "@anthropic-ai/claude-agent-sdk";
 import { isAbortError } from "./abort.js";
+import { applyAgentProxyToProcessEnv } from "./agent-proxy.js";
 import { ClaudeSessionManager } from "./claude-session-manager.js";
 import { CodexAppServerManager } from "./codex-app-server-manager.js";
 import { CursorSessionManager } from "./cursor-session-manager.js";
 import { createSidecarEmitter } from "./emitter.js";
 import { resolveHostResponse, setHostWriter } from "./host-bridge.js";
 import { errorDetails, logger } from "./logger.js";
+import { MIMO_PROTOCOL_CONFIG } from "./opencode-protocol/mimo.js";
+import { OPENCODE_PROTOCOL_CONFIG } from "./opencode-protocol/opencode.js";
+import { OpencodeProtocolSessionManager } from "./opencode-protocol/session-manager.js";
 import {
 	errorMessage,
 	optionalObject,
-	optionalString,
 	parseAgentProxySettings,
 	parseGetContextUsageParams,
 	parseListSlashCommandsParams,
-	parseOptionalStringRecord,
 	parseProvider,
 	parseRequest,
 	parseSendMessageParams,
@@ -37,19 +39,22 @@ import type {
 	SessionManager,
 	UserInputResolution,
 } from "./session-manager.js";
-import {
-	TITLE_GENERATION_FALLBACK_TIMEOUT_MS,
-	TITLE_GENERATION_TIMEOUT_MS,
-} from "./title.js";
+import { TITLE_GENERATION_TIMEOUT_MS } from "./title.js";
 import { handleRunTriageTick, handleStopTriageTick } from "./triage/index.js";
 
 const claudeManager = new ClaudeSessionManager();
 const codexManager = new CodexAppServerManager();
 const cursorManager = new CursorSessionManager();
+const opencodeManager = new OpencodeProtocolSessionManager(
+	OPENCODE_PROTOCOL_CONFIG,
+);
+const mimoManager = new OpencodeProtocolSessionManager(MIMO_PROTOCOL_CONFIG);
 const managers: Record<Provider, SessionManager> = {
 	claude: claudeManager,
 	codex: codexManager,
 	cursor: cursorManager,
+	opencode: opencodeManager,
+	mimo: mimoManager,
 };
 
 // `parentGone` flips to true only when stdin EOFs — that's the
@@ -204,6 +209,7 @@ async function handleSendMessage(
 	try {
 		const provider = parseProvider(params.provider);
 		const sendParams = parseSendMessageParams(params);
+		applyAgentProxyToProcessEnv(sendParams.agentProxy);
 		logger.debug(`[${id}] sendMessage`, {
 			prompt: sendParams.prompt?.slice(0, 100),
 			model: sendParams.model ?? "(default)",
@@ -228,6 +234,50 @@ async function handleSendMessage(
 	}
 }
 
+interface TitleAttempt {
+	readonly provider: Provider;
+	readonly model?: string;
+	readonly claudeEnvironment?: Record<string, string>;
+}
+
+function asStringRecord(v: unknown): Record<string, string> | undefined {
+	if (!v || typeof v !== "object") return undefined;
+	const out: Record<string, string> = {};
+	for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+		if (typeof val === "string") out[k] = val;
+	}
+	return Object.keys(out).length > 0 ? out : undefined;
+}
+
+// Parse Rust's ordered title-generation attempt chain. Each entry is a
+// { provider, model?, claudeEnvironment? }. Always yields at least one entry
+// so a missing/empty list still tries claude's default.
+function parseTitleAttempts(raw: unknown): TitleAttempt[] {
+	const out: TitleAttempt[] = [];
+	if (Array.isArray(raw)) {
+		for (const item of raw) {
+			if (!item || typeof item !== "object") continue;
+			const obj = item as Record<string, unknown>;
+			const provider =
+				obj.provider === "claude" ||
+				obj.provider === "codex" ||
+				obj.provider === "cursor" ||
+				obj.provider === "opencode" ||
+				obj.provider === "mimo"
+					? obj.provider
+					: null;
+			if (!provider) continue;
+			out.push({
+				provider,
+				model: typeof obj.model === "string" ? obj.model : undefined,
+				claudeEnvironment: asStringRecord(obj.claudeEnvironment),
+			});
+		}
+	}
+	if (out.length === 0) out.push({ provider: "claude" });
+	return out;
+}
+
 async function handleGenerateTitle(
 	id: string,
 	params: Record<string, unknown>,
@@ -238,90 +288,51 @@ async function handleGenerateTitle(
 			typeof params.branchRenamePrompt === "string"
 				? params.branchRenamePrompt
 				: null;
-		const claudeModel = optionalString(params, "claudeModel");
-		const claudeEnvironment = parseOptionalStringRecord(
-			params,
-			"claudeEnvironment",
-		);
 		const agentProxy = parseAgentProxySettings(params, "agentProxy");
 		// Default true so older clients without the field keep getting both
 		// title and branch. Pass `false` to skip the branch slug entirely.
 		const generateBranch =
 			typeof params.generateBranch === "boolean" ? params.generateBranch : true;
+		// Rust builds the ordered attempt chain from the user's configured
+		// models (action → review → default, deduped); each claude/opencode
+		// step tries the custom model first, then the provider's fast default.
+		// Walk it and stop at the first attempt that produces a title.
+		const attempts = parseTitleAttempts(params.attempts);
 		logger.debug(`[${id}] generateTitle`, {
 			userMessage: userMessage.slice(0, 100),
-			claudeModel: claudeModel ?? "haiku",
-			customClaudeEnvironment: Boolean(claudeEnvironment),
+			attempts: attempts.map((a) => `${a.provider}:${a.model ?? "(default)"}`),
 			generateBranch,
 		});
 
-		// Try the configured Claude-compatible model first when available;
-		// otherwise use official Claude, then fall back to Codex, then
-		// fall back to Cursor. The chain order is by ascending cost-of-
-		// last-resort: Claude/Codex pay nothing per-call (their CLI
-		// auth covers it), Cursor inference is metered against the
-		// user's plan, so it stays at the end.
-		try {
-			await managers.claude.generateTitle(
-				id,
-				userMessage,
-				branchRenamePrompt,
-				emitter,
-				TITLE_GENERATION_TIMEOUT_MS,
-				{ model: claudeModel, claudeEnvironment, agentProxy, generateBranch },
+		let lastError: unknown = null;
+		for (const attempt of attempts) {
+			logger.debug(
+				`[${id}] generateTitle attempt provider=${attempt.provider} model=${attempt.model ?? "(default)"} customEnv=${Boolean(attempt.claudeEnvironment)}`,
 			);
-			logger.debug(`[${id}] generateTitle completed (claude)`);
-		} catch (claudeErr) {
-			if (claudeModel || claudeEnvironment) {
-				logger.debug(
-					`[${id}] generateTitle custom claude failed, trying official claude: ${errorMessage(claudeErr)}`,
-				);
-				try {
-					await managers.claude.generateTitle(
-						id,
-						userMessage,
-						branchRenamePrompt,
-						emitter,
-						TITLE_GENERATION_TIMEOUT_MS,
-						{ agentProxy, generateBranch },
-					);
-					logger.debug(`[${id}] generateTitle completed (official claude)`);
-					return;
-				} catch (officialClaudeErr) {
-					logger.debug(
-						`[${id}] generateTitle official claude failed, trying codex: ${errorMessage(officialClaudeErr)}`,
-					);
-				}
-			} else {
-				logger.debug(
-					`[${id}] generateTitle claude failed, trying codex: ${errorMessage(claudeErr)}`,
-				);
-			}
 			try {
-				await managers.codex.generateTitle(
+				await managers[attempt.provider].generateTitle(
 					id,
 					userMessage,
 					branchRenamePrompt,
 					emitter,
-					TITLE_GENERATION_FALLBACK_TIMEOUT_MS,
-					{ agentProxy, generateBranch },
+					TITLE_GENERATION_TIMEOUT_MS,
+					{
+						model: attempt.model,
+						claudeEnvironment: attempt.claudeEnvironment,
+						agentProxy,
+						generateBranch,
+					},
 				);
-				logger.debug(`[${id}] generateTitle completed (codex fallback)`);
-			} catch (codexErr) {
+				logger.debug(`[${id}] generateTitle completed (${attempt.provider})`);
+				return;
+			} catch (err) {
+				lastError = err;
 				logger.debug(
-					`[${id}] generateTitle codex failed, trying cursor: ${errorMessage(codexErr)}`,
+					`[${id}] generateTitle attempt ${attempt.provider} failed: ${errorMessage(err)}`,
 				);
-				await managers.cursor.generateTitle(
-					id,
-					userMessage,
-					branchRenamePrompt,
-					emitter,
-					TITLE_GENERATION_FALLBACK_TIMEOUT_MS,
-					{ generateBranch },
-				);
-				logger.debug(`[${id}] generateTitle completed (cursor fallback)`);
 			}
 		}
+		throw lastError ?? new Error("no title attempt produced a result");
 	} catch (err) {
 		const msg = errorMessage(err);
 		logger.error(`[${id}] generateTitle FAILED: ${msg}`, errorDetails(err));
@@ -341,9 +352,16 @@ async function handleListModels(
 			typeof params.apiKey === "string" && params.apiKey.length > 0
 				? params.apiKey
 				: undefined;
-		logger.debug(`[${id}] listModels`, { provider, override: Boolean(apiKey) });
+		const forceReload = params.forceReload === true;
+		logger.debug(`[${id}] listModels`, {
+			provider,
+			override: Boolean(apiKey),
+			forceReload,
+		});
 		const models = await managers[provider].listModels(
-			apiKey ? { apiKey } : undefined,
+			apiKey || forceReload
+				? { ...(apiKey ? { apiKey } : {}), forceReload }
+				: undefined,
 		);
 		emitter.modelsListed(id, provider, models);
 		logger.debug(`[${id}] listModels → ${models.length} entries (${provider})`);
@@ -629,9 +647,13 @@ for await (const line of rl) {
 				const message =
 					typeof params.message === "string" ? params.message : undefined;
 				logger.debug(`[${id}] permissionResponse`, { permissionId, behavior });
-				// Route to the right provider — Codex permissions use "codex-" prefix
+				// Route by id prefix: `codex-`, `opencode-`, `mimo-`, else Claude.
 				if (permissionId.startsWith("codex-")) {
 					codexManager.resolvePermission(permissionId, behavior);
+				} else if (permissionId.startsWith("opencode-")) {
+					opencodeManager.resolvePermission(permissionId, behavior);
+				} else if (permissionId.startsWith("mimo-")) {
+					mimoManager.resolvePermission(permissionId, behavior);
 				} else {
 					claudeManager.resolvePermission(
 						permissionId,
@@ -672,7 +694,9 @@ for await (const line of rl) {
 							: { action: "cancel" };
 				const claimed =
 					claudeManager.resolveUserInput(userInputId, resolution) ||
-					codexManager.resolveUserInput(userInputId, resolution);
+					codexManager.resolveUserInput(userInputId, resolution) ||
+					opencodeManager.resolveUserInput(userInputId, resolution) ||
+					mimoManager.resolveUserInput(userInputId, resolution);
 				if (!claimed) {
 					// No live waiter — the parked promise was lost (sidecar
 					// restart, session ended, or duplicate submit). Surface

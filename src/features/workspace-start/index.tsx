@@ -50,6 +50,7 @@ import { cn } from "@/lib/utils";
 import { publishShellEvent } from "@/shell/event-bus";
 import { CreateBranchDialog } from "./create-branch-dialog";
 
+const COMPACT_TRAFFIC_LIGHT_SPACER_WIDTH = 60;
 const PREVIEW_TRAFFIC_LIGHT_SPACER_WIDTH = 52;
 
 function defaultBranchPrefix(repo: RepositoryCreateOption | null): string {
@@ -85,8 +86,13 @@ type WorkspaceStartPageProps = {
 	onCreateAndCheckoutBranch?: (branch: string) => Promise<void>;
 	previewCard?: ContextCard | null;
 	previewAppendContextTarget?: ComposerInsertTarget;
+	headerLeading?: React.ReactNode;
 	showWindowSafeTop?: boolean;
 	onClosePreview?: () => void;
+	/** Quick panel layout: pin the composer to the bottom edge and center
+	 * the heading in the space above it (instead of centering the whole
+	 * block at mid-height). */
+	composerAtBottom?: boolean;
 	children: React.ReactNode;
 };
 
@@ -106,8 +112,10 @@ export function WorkspaceStartPage({
 	onCreateAndCheckoutBranch,
 	previewCard = null,
 	previewAppendContextTarget,
+	headerLeading,
 	showWindowSafeTop = false,
 	onClosePreview,
+	composerAtBottom = false,
 	children,
 }: WorkspaceStartPageProps) {
 	const [createBranchOpen, setCreateBranchOpen] = useState(false);
@@ -183,8 +191,18 @@ export function WorkspaceStartPage({
 	return (
 		<div
 			data-focus-scope="start-composer"
-			className="flex min-h-0 flex-1 justify-center"
+			className="relative flex min-h-0 flex-1 justify-center"
 		>
+			{headerLeading ? (
+				<div className="absolute left-0 top-0 z-30 flex h-9 items-center">
+					<TrafficLightSpacer
+						side="left"
+						width={COMPACT_TRAFFIC_LIGHT_SPACER_WIDTH}
+						className="hidden max-[960px]:block"
+					/>
+					{headerLeading}
+				</div>
+			) : null}
 			<div className="relative h-full min-h-0 w-full max-w-5xl">
 				<div
 					className={cn(
@@ -252,24 +270,29 @@ export function WorkspaceStartPage({
 				<div
 					className={cn(
 						"absolute left-1/2 flex w-full max-w-3xl -translate-x-1/2 flex-col items-center transition-[top,transform,opacity,gap] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]",
-						previewCard
-							? "top-[calc(100%-11rem)] gap-0"
-							: "top-1/2 gap-7 -translate-y-1/2",
+						composerAtBottom
+							? "inset-y-0 gap-7 pb-3"
+							: previewCard
+								? "top-[calc(100%-11rem)] gap-0"
+								: "top-1/2 gap-7 -translate-y-1/2",
 					)}
 				>
 					<div
 						aria-hidden={previewCard ? true : undefined}
 						className={cn(
 							"relative w-full overflow-hidden transition-[height,opacity,transform] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]",
-							previewCard
-								? "pointer-events-none h-0 translate-y-2 opacity-0"
-								: "h-10 translate-y-0 opacity-100",
+							composerAtBottom
+								? "min-h-0 flex-1"
+								: previewCard
+									? "pointer-events-none h-0 translate-y-2 opacity-0"
+									: "h-10 translate-y-0 opacity-100",
 						)}
 					>
 						<div
 							className={cn(
-								"absolute top-0 flex items-center gap-x-2 whitespace-nowrap text-center font-semibold leading-tight tracking-normal text-foreground transition-[left,transform,font-size] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]",
+								"absolute flex items-center gap-x-2 whitespace-nowrap text-center font-semibold leading-tight tracking-normal text-foreground transition-[left,transform,font-size] duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]",
 								"left-1/2 -translate-x-1/2 text-[24px]",
+								composerAtBottom ? "top-1/2 -translate-y-1/2" : "top-0",
 							)}
 						>
 							{mode === "chat" ? (

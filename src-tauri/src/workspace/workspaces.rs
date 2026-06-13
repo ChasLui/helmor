@@ -30,13 +30,13 @@ pub use super::branching::{
 };
 pub use super::lifecycle::{
     archive_workspace_impl, cleanup_orphaned_initializing_workspaces,
-    create_workspace_from_repo_impl, execute_archive_plan, finalize_workspace_from_repo_impl,
-    move_local_workspace_to_worktree_impl, prepare_archive_plan, prepare_chat_workspace_impl,
-    prepare_local_workspace_impl, prepare_workspace_from_repo_impl, restore_workspace_impl,
-    validate_archive_workspace, validate_restore_workspace, ArchivePreparedPlan,
-    ArchiveWorkspaceResponse, BranchRename, CreateWorkspaceResponse, FinalizeWorkspaceResponse,
-    MoveLocalToWorktreeResponse, PrepareWorkspaceResponse, RestoreWorkspaceResponse,
-    TargetBranchConflict, ValidateRestoreResponse,
+    create_stacked_workspace_impl, create_workspace_from_repo_impl, execute_archive_plan,
+    finalize_workspace_from_repo_impl, move_local_workspace_to_worktree_impl, prepare_archive_plan,
+    prepare_chat_workspace_impl, prepare_local_workspace_impl, prepare_workspace_from_repo_impl,
+    restore_workspace_impl, validate_archive_workspace, validate_restore_workspace,
+    ArchivePreparedPlan, ArchiveWorkspaceResponse, BranchRename, CreateWorkspaceResponse,
+    FinalizeWorkspaceResponse, MoveLocalToWorktreeResponse, PrepareWorkspaceResponse,
+    RestoreWorkspaceResponse, TargetBranchConflict, ValidateRestoreResponse,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +81,13 @@ pub struct WorkspaceSidebarRow {
     pub kind: String,
     /// True while an ai_triage row still needs the user's first send.
     pub triage_priming_unconsumed: bool,
+    /// Originating triage platform for ai_triage rows ("github", "gitlab",
+    /// "slack", "lark"). `None` for manual workspaces. Drives the sidebar
+    /// source-logo badge on AI-proposed rows.
+    pub triage_source_type: Option<String>,
+    /// Stacked PRs: `id` of the workspace one layer below this in a PR stack
+    /// (its base). `None` for non-stacked rows. Drives sidebar stack grouping.
+    pub parent_workspace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,6 +161,10 @@ pub struct WorkspaceDetail {
     pub branch: Option<String>,
     pub initialization_parent_branch: Option<String>,
     pub intended_target_branch: Option<String>,
+    /// Stacked-PR parent link. When set, this workspace stacks on the
+    /// referenced workspace; the header renders a live "→ <parent title>"
+    /// chip instead of the raw target-branch picker.
+    pub parent_workspace_id: Option<String>,
     pub mode: WorkspaceMode,
     pub pinned_at: Option<String>,
     pub display_order: i64,
@@ -1227,7 +1238,11 @@ mod candidate_directories_tests {
             assert_eq!(row.repo_name, "alpha");
             // repo_initials are derived from the repo name at display time.
             assert!(!row.repo_initials.is_empty());
-            assert!(row.absolute_path.ends_with("/alpha/feat-x"));
+            // Native filesystem path — backslash separators on Windows.
+            assert!(row
+                .absolute_path
+                .replace('\\', "/")
+                .ends_with("/alpha/feat-x"));
         });
     }
 }
@@ -1299,6 +1314,8 @@ pub fn record_to_sidebar_row(record: WorkspaceRecord) -> WorkspaceSidebarRow {
         updated_at: record.updated_at,
         last_user_message_at: record.last_user_message_at,
         triage_priming_unconsumed: record.kind == "ai_triage" && !record.ai_priming_consumed,
+        triage_source_type: record.triage_source_type,
+        parent_workspace_id: record.parent_workspace_id,
         kind: record.kind,
     }
 }
@@ -1389,6 +1406,7 @@ pub fn record_to_detail(record: WorkspaceRecord) -> WorkspaceDetail {
         mode: record.mode,
         initialization_parent_branch: record.initialization_parent_branch,
         intended_target_branch: record.intended_target_branch,
+        parent_workspace_id: record.parent_workspace_id,
         pinned_at: record.pinned_at,
         display_order: record.display_order,
         pr_title: record.pr_title,
@@ -1514,6 +1532,40 @@ pub fn degrade_workspace_to_archived(workspace_id: &str) -> Result<bool> {
 pub fn permanently_delete_workspace(workspace_id: &str) -> Result<()> {
     let mut connection = db::write_conn()?;
 
+    // --- Stacked-PR deletion guard: tip free / root = pop-bottom / middle
+    // blocked. A middle layer (a live parent below AND layers stacked above)
+    // can't be deleted — it would leave an unrebaseable hole in the stack.
+    let (parent_id, default_branch): (Option<String>, Option<String>) = connection
+        .query_row(
+            "SELECT w.parent_workspace_id, r.default_branch
+               FROM workspaces w JOIN repos r ON r.id = w.repository_id WHERE w.id = ?1",
+            [workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap_or((None, None));
+    let has_children: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM workspaces WHERE parent_workspace_id = ?1)",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+    let has_live_parent = match parent_id.as_deref() {
+        Some(parent) => connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM workspaces WHERE id = ?1)",
+                [parent],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false),
+        None => false,
+    };
+    if has_live_parent && has_children {
+        bail!(
+            "Cannot delete a middle layer of a PR stack — other workspaces are stacked on it. Delete from the top of the stack (the tip) downward, or restack first."
+        );
+    }
+
     // Load workspace info for filesystem cleanup. Skips the dir delete
     // step for local-mode rows (whose "dir" is the user's repo root).
     let record: Option<(
@@ -1563,6 +1615,21 @@ pub fn permanently_delete_workspace(workspace_id: &str) -> Result<()> {
         bail!("Workspace delete affected {deleted_rows} rows for {workspace_id}");
     }
 
+    // Root pop: a deleted stack root's direct children become new roots
+    // targeting the repo default branch (they'll need a restack onto it).
+    if has_children {
+        transaction
+            .execute(
+                "UPDATE workspaces
+                   SET parent_workspace_id = NULL,
+                       intended_target_branch = ?2,
+                       updated_at = datetime('now')
+                 WHERE parent_workspace_id = ?1",
+                (workspace_id, default_branch.as_deref().unwrap_or("main")),
+            )
+            .context("Failed to reparent stack children after root delete")?;
+    }
+
     transaction
         .commit()
         .context("Failed to commit delete workspace transaction")?;
@@ -1600,6 +1667,55 @@ pub fn permanently_delete_workspace(workspace_id: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupArchivedFailure {
+    pub workspace_id: String,
+    pub title: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CleanupArchivedWorkspacesResponse {
+    pub deleted_count: usize,
+    pub failures: Vec<CleanupArchivedFailure>,
+}
+
+/// Compact the SQLite file after a bulk delete. Dropping rows only marks
+/// their pages as free for reuse — the file itself never shrinks — so a
+/// cleanup whose entire point is reclaiming disk space must `VACUUM` once
+/// at the end to hand the space back to the OS. In WAL mode the vacuum's
+/// rewrite lands in the `-wal` file and the main file only shrinks at the
+/// next checkpoint, so force a truncating checkpoint right away instead
+/// of leaving the reclaim to whenever the auto-checkpointer fires.
+pub fn vacuum_database() -> Result<()> {
+    let connection = db::write_conn()?;
+    connection
+        .execute_batch("VACUUM")
+        .context("Failed to vacuum database")?;
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .context("Failed to checkpoint WAL after vacuum")?;
+    Ok(())
+}
+
+/// Delete a workspace via [`permanently_delete_workspace`] only if it is
+/// still archived when we get to it. Returns `Ok(false)` (skip, not an
+/// error) when the row is gone or no longer archived — the bulk archive
+/// cleanup snapshots its id list up front, and a workspace restored (or
+/// deleted elsewhere) mid-run must be left alone. Callers hold the
+/// per-workspace FS mutation lock, so the check can't race a restore.
+pub fn delete_workspace_if_archived(workspace_id: &str) -> Result<bool> {
+    match workspace_models::load_workspace_record_by_id(workspace_id)? {
+        Some(record) if record.state == WorkspaceState::Archived => {
+            permanently_delete_workspace(workspace_id)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 #[cfg(test)]
@@ -1661,6 +1777,73 @@ mod tests {
             workspace_state(&env, "w-archived").as_deref(),
             Some("archived")
         );
+    }
+
+    #[test]
+    fn update_workspace_branch_cascades_to_stacked_children() {
+        let env = TestEnv::new("branch-cascade");
+        let conn = env.db_connection();
+        insert_repo(&conn, "r1", "demo", Some("origin"));
+        insert_workspace(
+            &conn,
+            &WorkspaceFixture {
+                id: "parent",
+                repo_id: "r1",
+                directory_name: "parent",
+                state: "ready",
+                branch: Some("feat/parent-old"),
+                intended_target_branch: Some("main"),
+            },
+        );
+        insert_workspace(
+            &conn,
+            &WorkspaceFixture {
+                id: "child",
+                repo_id: "r1",
+                directory_name: "child",
+                state: "ready",
+                branch: Some("feat/child"),
+                intended_target_branch: Some("feat/parent-old"),
+            },
+        );
+        insert_workspace(
+            &conn,
+            &WorkspaceFixture {
+                id: "solo",
+                repo_id: "r1",
+                directory_name: "solo",
+                state: "ready",
+                branch: Some("feat/solo"),
+                intended_target_branch: Some("main"),
+            },
+        );
+        conn.execute(
+            "UPDATE workspaces SET parent_workspace_id = 'parent' WHERE id = 'child'",
+            [],
+        )
+        .unwrap();
+
+        crate::models::workspaces::update_workspace_branch("parent", "feat/parent-new").unwrap();
+
+        let branch_of = |id: &str| -> String {
+            conn.query_row("SELECT branch FROM workspaces WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        let target_of = |id: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT intended_target_branch FROM workspaces WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        // Parent's own branch is renamed; the child's cached target follows it,
+        // while an unrelated standalone workspace is left alone.
+        assert_eq!(branch_of("parent"), "feat/parent-new");
+        assert_eq!(target_of("child").as_deref(), Some("feat/parent-new"));
+        assert_eq!(target_of("solo").as_deref(), Some("main"));
     }
 
     #[test]
@@ -2316,6 +2499,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining, 0, "DB row must be gone too");
+    }
+
+    #[test]
+    fn delete_workspace_if_archived_deletes_archived_row() {
+        let env = TestEnv::new("cleanup-archived-deletes");
+        let conn = env.db_connection();
+        insert_repo(&conn, "r1", "demo", None);
+        insert_workspace(
+            &conn,
+            &WorkspaceFixture {
+                id: "w-archived",
+                repo_id: "r1",
+                directory_name: "alpha",
+                state: WorkspaceState::Archived.as_str(),
+                branch: Some("feature/alpha"),
+                intended_target_branch: None,
+            },
+        );
+
+        let deleted = delete_workspace_if_archived("w-archived").unwrap();
+
+        assert!(deleted, "archived row must be deleted");
+        assert_eq!(count_workspaces(&env), 0);
+    }
+
+    #[test]
+    fn delete_workspace_if_archived_skips_operational_and_missing_rows() {
+        let env = TestEnv::new("cleanup-archived-skips");
+        let conn = env.db_connection();
+        insert_repo(&conn, "r1", "demo", None);
+        insert_workspace(
+            &conn,
+            &WorkspaceFixture {
+                id: "w-ready",
+                repo_id: "r1",
+                directory_name: "alpha",
+                state: WorkspaceState::Ready.as_str(),
+                branch: Some("feature/alpha"),
+                intended_target_branch: None,
+            },
+        );
+
+        assert!(
+            !delete_workspace_if_archived("w-ready").unwrap(),
+            "operational row must be skipped, not deleted"
+        );
+        assert!(
+            !delete_workspace_if_archived("w-missing").unwrap(),
+            "missing row must be a silent skip"
+        );
+        assert_eq!(count_workspaces(&env), 1, "operational row must remain");
     }
 
     #[test]

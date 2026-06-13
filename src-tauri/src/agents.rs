@@ -12,6 +12,8 @@ mod builtin_claude_providers;
 mod catalog;
 pub(crate) mod claude_project_files;
 mod custom_providers;
+pub(crate) mod model_ref;
+pub(crate) mod opencode_config;
 mod persistence;
 pub mod provider_capabilities;
 mod queries;
@@ -33,7 +35,7 @@ pub use self::streaming::{
     abort_all_active_streams_blocking, bridge_aborted_event, bridge_done_event, bridge_error_event,
     bridge_permission_request_event, bridge_user_input_request_event, build_send_message_params,
     lookup_workspace_linked_directories, ActiveStreamSummary, ActiveStreams,
-    BuildSendMessageParamsInput,
+    BuildSendMessageParamsInput, SessionStreamHub,
 };
 
 use self::persistence::{
@@ -190,6 +192,12 @@ pub struct AgentSendRequest {
     /// round-trip without regex re-extraction.
     #[serde(default)]
     pub images: Option<Vec<String>>,
+    /// UTF-16 ranges of pasted-text tag spans inside `prompt` (composer
+    /// badge pastes). Persisted with the user_prompt so the renderer shows
+    /// those spans as tag chips; the agent still receives the full prompt
+    /// text — this never alters the wire payload.
+    #[serde(default)]
+    pub pasted_texts: Option<Vec<crate::pipeline::types::PastedTextRange>>,
 }
 
 #[cfg(test)]
@@ -229,6 +237,24 @@ pub async fn list_cursor_models(
 ) -> CmdResult<Vec<queries::CursorModelEntry>> {
     // Inline blocking — same pattern as `list_slash_commands`.
     queries::fetch_cursor_models(sidecar.inner(), api_key)
+}
+
+#[tauri::command]
+pub async fn list_opencode_models(
+    sidecar: tauri::State<'_, crate::sidecar::ManagedSidecar>,
+    force_reload: Option<bool>,
+) -> CmdResult<Vec<queries::OpencodeModelEntry>> {
+    // force_reload restarts the opencode server to pick up a just-written config.
+    queries::fetch_opencode_models(sidecar.inner(), force_reload.unwrap_or(false))
+}
+
+#[tauri::command]
+pub async fn list_mimo_models(
+    sidecar: tauri::State<'_, crate::sidecar::ManagedSidecar>,
+    force_reload: Option<bool>,
+) -> CmdResult<Vec<queries::OpencodeModelEntry>> {
+    // force_reload restarts the mimo server to pick up a just-written config.
+    queries::fetch_mimo_models(sidecar.inner(), force_reload.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -343,6 +369,36 @@ pub async fn list_active_streams(
     active_streams: tauri::State<'_, ActiveStreams>,
 ) -> CmdResult<Vec<ActiveStreamSummary>> {
     Ok(active_streams.snapshot_for_ui())
+}
+
+/// Attach a *watcher* to a session's live agent stream. The initiating client
+/// renders the turn from its own `send_agent_message_stream` channel; this lets
+/// ANY other connected client (a second desktop window, or the mobile
+/// companion over HTTP/NDJSON) mirror the same turn in real time. Events arrive
+/// on `on_event` exactly like the send path — the frontend feeds them through
+/// the same render pipeline. Symmetric across desktop and mobile.
+#[tauri::command]
+pub async fn subscribe_session_stream(
+    hub: tauri::State<'_, SessionStreamHub>,
+    session_id: String,
+    subscription_id: String,
+    on_event: Channel<AgentStreamEvent>,
+) -> CmdResult<()> {
+    hub.subscribe(session_id, subscription_id, on_event);
+    Ok(())
+}
+
+/// Detach a watcher previously attached via [`subscribe_session_stream`]. Over
+/// the companion HTTP bridge this is redundant (the SSE drop auto-unsubscribes)
+/// but native clients call it explicitly on teardown.
+#[tauri::command]
+pub async fn unsubscribe_session_stream(
+    hub: tauri::State<'_, SessionStreamHub>,
+    session_id: String,
+    subscription_id: String,
+) -> CmdResult<()> {
+    hub.unsubscribe(&session_id, &subscription_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -748,6 +804,7 @@ mod tests {
 
     #[test]
     fn resolve_model_infers_provider() {
+        let _env = crate::testkit::TestEnv::new("resolve-model-infers-provider");
         let claude = resolve_model("default", None);
         assert_eq!(claude.provider, "claude");
         assert_eq!(claude.cli_model, "default");
@@ -802,7 +859,7 @@ mod tests {
         };
 
         // 1. Persist user message
-        persist_user_message(&conn, &ctx, "Hello", &[], &[]).unwrap();
+        persist_user_message(&conn, &ctx, "Hello", &[], &[], &[]).unwrap();
 
         persist_result_and_finalize(
             &conn,
@@ -863,7 +920,7 @@ mod tests {
         let db_path = setup_test_db(dir.path());
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         conn.execute(
-            "INSERT INTO sessions (id, workspace_id, status, effort_level, permission_mode) VALUES ('s1', 'w1', 'idle', 'high', 'acceptEdits')",
+            "INSERT INTO sessions (id, workspace_id, status, effort_level, permission_mode) VALUES ('s1', 'w1', 'idle', 'high', 'bypassPermissions')",
             [],
         ).unwrap();
 
@@ -874,14 +931,14 @@ mod tests {
             user_message_id: Uuid::new_v4().to_string(),
         };
 
-        persist_user_message(&conn, &ctx, "Hi", &[], &[]).unwrap();
+        persist_user_message(&conn, &ctx, "Hi", &[], &[], &[]).unwrap();
         persist_result_and_finalize(
             &conn,
             &ctx,
             "opus",
             "Reply",
             None, // effort_level = None → should keep 'high'
-            None, // permission_mode = None → should keep 'acceptEdits'
+            None, // permission_mode = None → should keep 'bypassPermissions'
             &AgentUsage {
                 input_tokens: None,
                 output_tokens: None,
@@ -905,7 +962,7 @@ mod tests {
             "effort_level should be preserved when None passed"
         );
         assert_eq!(
-            perm, "acceptEdits",
+            perm, "bypassPermissions",
             "permission_mode should be preserved when None passed"
         );
 
@@ -933,7 +990,7 @@ mod tests {
         };
 
         // Persist user message
-        persist_user_message(&conn, &ctx, "Do something", &[], &[]).unwrap();
+        persist_user_message(&conn, &ctx, "Do something", &[], &[], &[]).unwrap();
 
         // Persist two intermediate turns
         let turn1 = CollectedTurn {
@@ -1004,7 +1061,7 @@ mod tests {
         };
 
         // 1. Initial prompt persisted via the normal path.
-        persist_user_message(&conn, &ctx, "investigate the bug", &[], &[]).unwrap();
+        persist_user_message(&conn, &ctx, "investigate the bug", &[], &[], &[]).unwrap();
 
         // 2. Drive the accumulator the same way the streaming loop does:
         //    assistant deltas, steer event, more assistant deltas, result.

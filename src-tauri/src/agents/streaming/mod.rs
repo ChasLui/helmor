@@ -19,6 +19,7 @@ pub(crate) mod context_usage;
 mod params;
 mod session_id;
 mod state;
+mod stream_hub;
 mod workflow_persist;
 
 #[cfg(test)]
@@ -31,10 +32,12 @@ pub use bridges::{
     bridge_user_input_request_event,
 };
 pub(crate) use cleanup::cleanup_abnormal_stream_exit;
+use cleanup::finalize_aborted_exchange;
 pub use params::{
     build_send_message_params, lookup_workspace_linked_directories, BuildSendMessageParamsInput,
 };
 use session_id::should_adopt_provider_session_id;
+pub use stream_hub::SessionStreamHub;
 
 use rusqlite::params;
 use serde_json::{json, Value};
@@ -254,6 +257,7 @@ pub(super) fn stream_via_sidecar(
     let user_message_id_copy = request.user_message_id.clone();
     let files_copy = request.files.clone().unwrap_or_default();
     let images_copy = request.images.clone().unwrap_or_default();
+    let pasted_texts_copy = request.pasted_texts.clone().unwrap_or_default();
     let sidecar_session_id_copy = sidecar_session_id.clone();
     let rid = request_id.clone();
 
@@ -321,8 +325,14 @@ pub(super) fn stream_via_sidecar(
                         tracing::error!(rid = %rid, "Failed to update fast_mode: {e}");
                     }
 
-                    match persist_user_message(&conn, &ctx, &prompt_copy, &files_copy, &images_copy)
-                    {
+                    match persist_user_message(
+                        &conn,
+                        &ctx,
+                        &prompt_copy,
+                        &files_copy,
+                        &images_copy,
+                        &pasted_texts_copy,
+                    ) {
                         Ok(()) => {
                             tracing::debug!(rid = %rid, "User message persisted to DB");
                             exchange_ctx = Some(ctx);
@@ -346,9 +356,12 @@ pub(super) fn stream_via_sidecar(
         // are a snapshot at session-start; events that mutate them
         // (e.g., `permissionModeChanged`) mirror the change back into
         // the legacy local vars until those readers migrate too.
+        let stream_hub = app.state::<stream_hub::SessionStreamHub>();
         let apply_ctx = actions::ApplyContext {
             on_event: &on_event,
             app: &app,
+            hub: stream_hub.inner(),
+            session_id: hsid_copy.as_deref(),
         };
         let mut turn_session = state::TurnSession::new(state::TurnContext {
             provider: provider.clone(),
@@ -413,7 +426,7 @@ pub(super) fn stream_via_sidecar(
                         .as_ref()
                         .map(|p| p.accumulator.resolved_model().to_string())
                         .unwrap_or_else(|| model_copy.cli_model.to_string());
-                    let persisted = cleanup_abnormal_stream_exit(
+                    let cleanup_outcome = cleanup_abnormal_stream_exit(
                         &rid,
                         exchange_ctx.as_ref(),
                         &resolved_model,
@@ -421,6 +434,21 @@ pub(super) fn stream_via_sidecar(
                         effort_copy.as_deref(),
                         turn_session.ctx.permission_mode.as_deref(),
                     );
+                    let persisted = cleanup_outcome.finalized;
+                    // The synthesized error row really inserted — let idle
+                    // observers mark the thread cache stale. Published here
+                    // (not inside the cleanup fn) so the helper stays free
+                    // of AppHandle plumbing.
+                    if cleanup_outcome.persisted_error {
+                        if let Some(ctx) = exchange_ctx.as_ref() {
+                            crate::ui_sync::publish(
+                                &app,
+                                crate::ui_sync::UiMutationEvent::SessionTurnPersisted {
+                                    session_id: ctx.helmor_session_id.clone(),
+                                },
+                            );
+                        }
+                    }
 
                     tracing::info!(
                         rid = %rid,
@@ -585,6 +613,7 @@ pub(super) fn stream_via_sidecar(
                         if is_aborted {
                             pipeline_state.accumulator.flush_codex_in_progress();
                             pipeline_state.accumulator.flush_cursor_in_progress();
+                            pipeline_state.accumulator.flush_opencode_in_progress();
                             pipeline_state.materialize_partial();
                             pipeline_state.accumulator.append_aborted_notice();
                         }
@@ -644,7 +673,16 @@ pub(super) fn stream_via_sidecar(
                                     &resolved_model,
                                     BAD_RESUME_USER_MESSAGE,
                                 ) {
-                                    Ok(_) => {}
+                                    Ok(_) => {
+                                        // Real insert — idle observers mark
+                                        // the thread cache stale.
+                                        crate::ui_sync::publish(
+                                            &app,
+                                            crate::ui_sync::UiMutationEvent::SessionTurnPersisted {
+                                                session_id: ctx.helmor_session_id.clone(),
+                                            },
+                                        );
+                                    }
                                     Err(error) => {
                                         tracing::error!(
                                             rid = %rid,
@@ -668,17 +706,25 @@ pub(super) fn stream_via_sidecar(
                                     }
                                 }
                             } else if is_aborted {
-                                match finalize_session_metadata(
+                                if finalize_aborted_exchange(
+                                    &rid,
                                     conn,
                                     ctx,
                                     status,
                                     effort_copy.as_deref(),
                                     turn_session.ctx.permission_mode.as_deref(),
                                 ) {
-                                    Ok(_) => persisted = true,
-                                    Err(error) => {
-                                        tracing::error!(rid = %rid, "Failed to finalize exchange: {error}");
-                                    }
+                                    persisted = true;
+                                    // The aborted turn's rows (user prompt,
+                                    // flushed turns, aborted notice) are in
+                                    // the DB — idle observers mark the
+                                    // thread cache stale.
+                                    crate::ui_sync::publish(
+                                        &app,
+                                        crate::ui_sync::UiMutationEvent::SessionTurnPersisted {
+                                            session_id: ctx.helmor_session_id.clone(),
+                                        },
+                                    );
                                 }
                             } else {
                                 let preassigned = pipeline_state.accumulator.take_result_id();
@@ -694,7 +740,19 @@ pub(super) fn stream_via_sidecar(
                                     status,
                                     preassigned,
                                 ) {
-                                    Ok(_) => persisted = true,
+                                    Ok(_) => {
+                                        persisted = true;
+                                        // The turn's result row really
+                                        // inserted — idle observers mark the
+                                        // thread cache stale (the local
+                                        // dispatcher skips this event).
+                                        crate::ui_sync::publish(
+                                            &app,
+                                            crate::ui_sync::UiMutationEvent::SessionTurnPersisted {
+                                                session_id: ctx.helmor_session_id.clone(),
+                                            },
+                                        );
+                                    }
                                     Err(error) => {
                                         tracing::error!(rid = %rid, "Failed to finalize exchange: {error}");
                                     }
@@ -1107,7 +1165,17 @@ pub(super) fn stream_via_sidecar(
                             .unwrap_or_else(|| model_copy.cli_model.to_string());
 
                         match persist_error_message(conn, ctx, &resolved_model, &message) {
-                            Ok(_) => persisted = true,
+                            Ok(_) => {
+                                persisted = true;
+                                // Real insert — idle observers mark the
+                                // thread cache stale.
+                                crate::ui_sync::publish(
+                                    &app,
+                                    crate::ui_sync::UiMutationEvent::SessionTurnPersisted {
+                                        session_id: ctx.helmor_session_id.clone(),
+                                    },
+                                );
+                            }
                             Err(error) => {
                                 tracing::error!(rid = %rid, "Failed to persist error message: {error}");
                             }
@@ -1439,6 +1507,23 @@ pub(crate) fn build_helmor_system_prompt_for_workspace(
     let linked_directories =
         crate::agents::streaming::lookup_workspace_linked_directories(helmor_session_id);
 
+    // Stacked-PR awareness: when this workspace is part of a multi-layer stack,
+    // surface a lightweight pointer so the agent self-locates and fetches the
+    // rest with `helmor workspace stack`. Best-effort — failures just elide it.
+    let stack = crate::models::workspaces::load_workspace_stack(workspace_id)
+        .ok()
+        .filter(|chain| chain.len() > 1)
+        .and_then(|chain| {
+            let index = chain.iter().position(|layer| layer.id == workspace_id)?;
+            Some(crate::agents::system_prompt::StackContext {
+                position: index + 1,
+                total: chain.len(),
+                parent_branch: index
+                    .checked_sub(1)
+                    .and_then(|below| chain[below].branch.clone()),
+            })
+        });
+
     let ctx = HelmorSystemPromptContext {
         workspace_label,
         workspace_root_path: working_directory.display().to_string(),
@@ -1446,6 +1531,7 @@ pub(crate) fn build_helmor_system_prompt_for_workspace(
         base_branch,
         linked_directories,
         cli_command_name,
+        stack,
     };
     Some(build_helmor_system_prompt(&ctx))
 }

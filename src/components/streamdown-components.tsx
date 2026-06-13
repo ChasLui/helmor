@@ -9,9 +9,7 @@
  * @see https://streamdown.ai/docs/components
  */
 
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { DownloadIcon } from "lucide-react";
 import {
 	type ComponentType,
@@ -20,6 +18,7 @@ import {
 	type MouseEvent,
 	type ReactElement,
 	type ReactNode,
+	useContext,
 	useRef,
 } from "react";
 import {
@@ -28,7 +27,11 @@ import {
 	tableDataToCSV,
 	tableDataToMarkdown,
 } from "streamdown";
-import { CodeBlock, CodeBlockCopyButton } from "@/components/ai/code-block";
+import {
+	CodeBlock,
+	CodeBlockCopyButton,
+	CodeBlockStreamingContext,
+} from "@/components/ai/code-block";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -46,7 +49,9 @@ import {
 import { useFileLinkContext } from "@/features/panel/message-components/file-link-context";
 import { saveTextFileAs } from "@/lib/api";
 import { isPathWithinRoot } from "@/lib/editor-session";
+import { convertFileSrc } from "@/lib/ipc";
 import { parseLocalFileLink } from "@/lib/local-file-link";
+import { openUrl } from "@/lib/platform-bridge";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -247,6 +252,7 @@ function childrenToText(children: ReactNode): string {
 }
 
 export function StreamdownPre({ children }: { children?: ReactNode }) {
+	const streaming = useContext(CodeBlockStreamingContext);
 	if (!isValidElement(children)) {
 		return children;
 	}
@@ -269,7 +275,7 @@ export function StreamdownPre({ children }: { children?: ReactNode }) {
 
 	const code = childrenToText(child.props.children);
 	return (
-		<CodeBlock code={code} language={language}>
+		<CodeBlock code={code} language={language} streaming={streaming}>
 			<CodeBlockCopyButton />
 		</CodeBlock>
 	);

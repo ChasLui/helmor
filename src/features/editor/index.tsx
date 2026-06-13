@@ -42,6 +42,7 @@ import {
 } from "@/lib/query-client";
 import { cn } from "@/lib/utils";
 import { describeUnknownError } from "@/lib/workspace-helpers";
+import { useRouterSelectedWorkspaceId } from "@/router/use-router-selection";
 
 // Refined segmented-tab look: no tray, soft glassy pill on the active state.
 // Hover only changes text color (no bg) — otherwise hover-on-inactive sits next
@@ -63,7 +64,6 @@ type WorkspaceEditorSurfaceProps = {
 	editorSession: EditorSessionState;
 	editShortcut?: string | null;
 	shortcutOverrides?: ShortcutMap;
-	workspaceId?: string | null;
 	workspaceRootPath?: string | null;
 	onChangeSession: (session: EditorSessionState) => void;
 	onExit: () => void;
@@ -419,13 +419,16 @@ export function WorkspaceEditorSurface({
 	editorSession,
 	editShortcut = null,
 	shortcutOverrides = {},
-	workspaceId = null,
 	workspaceRootPath,
 	onChangeSession,
 	onExit,
 	onError,
 }: WorkspaceEditorSurfaceProps) {
 	const queryClient = useQueryClient();
+	// Read the workspace id from the ROUTER (Stage 3b: navigation intent is
+	// router-owned). Same value AppShell used to read off the store's
+	// `selectedWorkspaceId`; the delivery channel moved to the router.
+	const workspaceId = useRouterSelectedWorkspaceId();
 	const surfaceRef = useRef<HTMLElement>(null);
 	const editorHostRef = useRef<HTMLDivElement>(null);
 	const fileControllerRef = useRef<FileController | null>(null);

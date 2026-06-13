@@ -9,12 +9,22 @@ const CURSOR_REASONING_LEVELS = ["low", "medium", "high"] as const;
 // `list_agent_model_sections` command; this one feeds `listModels`.
 const MODEL_CATALOG: Record<Provider, readonly ProviderModelInfo[]> = {
 	claude: [
+		// Fable 5 leads the list as the most capable pick, but it burns limits
+		// ~2x faster than Opus — `useEnsureDefaultModel` pins the app default
+		// to the `default` (Opus) entry below, NOT to the first entry. No fast
+		// mode (Opus 4.6+ only).
+		{
+			id: "claude-fable-5[1m]",
+			label: "Fable 5 1M",
+			cliModel: "claude-fable-5[1m]",
+			effortLevels: ["low", "medium", "high", "xhigh", "max"],
+		},
 		// `default` resolves to the newest Opus the bundled claude-code knows
-		// about — in 2.1.154 that is Opus 4.8 (1M context, adaptive thinking,
+		// about — in 2.1.170 that is Opus 4.8 (1M context, adaptive thinking,
 		// default high effort, fast mode at 2x rate / 2.5x speed). Kept as
 		// `default` (rather than pinned `claude-opus-4-8`) so it stays the
-		// auto-latest pick AND remains the catalog's first entry, which
-		// `useEnsureDefaultModel` selects as the app default.
+		// auto-latest pick AND remains the app default selection (see
+		// `useEnsureDefaultModel`, which prefers id == "default").
 		{
 			id: "default",
 			label: "Opus 4.8 1M",
@@ -73,26 +83,62 @@ const MODEL_CATALOG: Record<Provider, readonly ProviderModelInfo[]> = {
 			effortLevels: CODEX_EFFORT_LEVELS,
 			supportsFastMode: true,
 		},
+	],
+	// Static seed; live set comes from `OpencodeProtocolSessionManager.listModels`.
+	// MUST stay in sync with Rust `opencode_section()` in agents/catalog.rs.
+	// Ids are opencode's `provider/model` slug.
+	opencode: [
 		{
-			id: "gpt-5.3-codex",
-			label: "GPT-5.3-Codex",
-			cliModel: "gpt-5.3-codex",
-			effortLevels: CODEX_EFFORT_LEVELS,
-			supportsFastMode: true,
+			id: "anthropic/claude-opus-4-5",
+			label: "Claude Opus 4.5",
+			cliModel: "anthropic/claude-opus-4-5",
 		},
 		{
-			id: "gpt-5.3-codex-spark",
-			label: "GPT-5.3-Codex-Spark",
-			cliModel: "gpt-5.3-codex-spark",
-			effortLevels: CODEX_EFFORT_LEVELS,
-			supportsFastMode: true,
+			id: "anthropic/claude-sonnet-4-6",
+			label: "Claude Sonnet 4.6",
+			cliModel: "anthropic/claude-sonnet-4-6",
 		},
 		{
-			id: "gpt-5.2",
+			id: "anthropic/claude-haiku-4-5",
+			label: "Claude Haiku 4.5",
+			cliModel: "anthropic/claude-haiku-4-5",
+		},
+		{
+			id: "openai/gpt-5.2",
 			label: "GPT-5.2",
-			cliModel: "gpt-5.2",
-			effortLevels: CODEX_EFFORT_LEVELS,
-			supportsFastMode: true,
+			cliModel: "openai/gpt-5.2",
+		},
+		{
+			id: "openai/gpt-5-codex",
+			label: "GPT-5-Codex",
+			cliModel: "openai/gpt-5-codex",
+		},
+	],
+	// Static seed; live set comes from the shared opencode-protocol
+	// `listModels` (provider.list against `mimo serve`). MUST stay in sync
+	// with Rust `mimo_section()` in agents/catalog.rs. Ids are the fork's
+	// `provider/model` slug; `xiaomi` is the official MiMo platform provider,
+	// `mimo` is the bundled MiMo Auto meta-provider.
+	mimo: [
+		{
+			id: "xiaomi/mimo-v2.5-pro",
+			label: "MiMo V2.5 Pro",
+			cliModel: "xiaomi/mimo-v2.5-pro",
+		},
+		{
+			id: "xiaomi/mimo-v2.5",
+			label: "MiMo V2.5",
+			cliModel: "xiaomi/mimo-v2.5",
+		},
+		{
+			id: "xiaomi/mimo-v2-flash",
+			label: "MiMo V2 Flash",
+			cliModel: "xiaomi/mimo-v2-flash",
+		},
+		{
+			id: "mimo/mimo-auto",
+			label: "MiMo Auto",
+			cliModel: "mimo/mimo-auto",
 		},
 	],
 	// Static fallback only — `CursorSessionManager.listModels` hits the live
@@ -155,5 +201,5 @@ export function pickFastestCodexModel(): string {
 			best = { cliModel: m.cliModel, version, isMini };
 		}
 	}
-	return best?.cliModel ?? "gpt-5.2";
+	return best?.cliModel ?? "gpt-5.4-mini";
 }

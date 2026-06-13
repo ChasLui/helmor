@@ -14,9 +14,11 @@ export type ShortcutId =
 	| "session.new"
 	| "session.close"
 	| "session.reopenClosed"
+	| "window.close"
 	| "script.run"
 	| "settings.open"
 	| "theme.toggle"
+	| "window.miniMode.toggle"
 	| "sidebar.left.toggle"
 	| "sidebar.right.toggle"
 	| "zen.toggle"
@@ -24,6 +26,7 @@ export type ShortcutId =
 	| "zoom.out"
 	| "zoom.reset"
 	| "global.hotkey"
+	| "quickPanel.hotkey"
 	| "action.createPr"
 	| "action.commitAndPush"
 	| "action.pullLatest"
@@ -32,6 +35,7 @@ export type ShortcutId =
 	| "action.openPullRequest"
 	| "composer.focus"
 	| "composer.togglePlanMode"
+	| "composer.toggleTerminalMode"
 	| "composer.toggleContextPanel"
 	| "composer.openModelPicker"
 	| "composer.toggleFollowUpBehavior"
@@ -67,8 +71,7 @@ export type ShortcutGroup =
 // `start-composer` and `workspace-composer` are sibling leaf scopes that split
 // the composer namespace by surface. They both inherit from `composer` (and
 // transitively from `chat`) so generic composer shortcuts keep firing, but
-// surface-specific shortcuts (Shift+Tab → cycle repo on start, toggle plan
-// mode on workspace) can target one and not the other.
+// surface-specific shortcuts can target one and not the other.
 export type ShortcutScope =
 	| "app"
 	| "chat"

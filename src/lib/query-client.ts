@@ -1,6 +1,5 @@
 import { createAsyncStoragePersister } from "@tanstack/query-async-storage-persister";
 import { focusManager, QueryClient, queryOptions } from "@tanstack/react-query";
-import { invoke } from "@tauri-apps/api/core";
 import type { ThreadMessageLike } from "./api";
 import {
 	type ActionKind,
@@ -47,13 +46,18 @@ import {
 	type PrSyncState,
 	refreshWorkspaceChangeRequest,
 } from "./api";
+// Routed through the transport shim so query-cache persistence works in the
+// mobile browser companion too (not just the Tauri webview).
+import { invoke } from "./ipc";
 import { parsePrUrl } from "./pr-url";
+// Lazy-cycle-safe: session-thread-cache imports `helmorQueryKeys` from this
+// module, but both sides only dereference inside function bodies.
+import { shareMessages } from "./session-thread-cache";
 import {
 	getSessionThreadPaginationState,
 	setSessionThreadPaginationState,
 } from "./session-thread-pagination";
 
-const SESSION_STALE_TIME = 10 * 60_000;
 const CHANGES_STALE_TIME = 3_000;
 const CHANGES_REFETCH_INTERVAL = 10_000;
 const WORKSPACE_FORGE_REFETCH_INTERVAL = 60_000;
@@ -66,6 +70,10 @@ export const helmorQueryKeys = {
 	archivedWorkspaces: ["archivedWorkspaces"] as const,
 	repositories: ["repositories"] as const,
 	agentModelSections: ["agentModelSections"] as const,
+	opencodeCustomProviders: ["opencodeCustomProviders"] as const,
+	mimoCustomProviders: ["mimoCustomProviders"] as const,
+	agentLoginStatus: ["agentLoginStatus"] as const,
+	agentVersions: ["agentVersions"] as const,
 	providerCapabilities: ["providerCapabilities"] as const,
 	workspaceDetail: (workspaceId: string) =>
 		["workspaceDetail", workspaceId] as const,
@@ -105,12 +113,6 @@ export const helmorQueryKeys = {
 	forgeAccountsAll: ["forgeAccounts"] as const,
 	workspaceAccountProfile: (workspaceId: string) =>
 		["workspaceAccountProfile", workspaceId] as const,
-	/// Lightweight per-host login set probe (no profile fetch). Used as
-	/// the focus-driven auth liveness check: account / repo settings
-	/// surfaces refetch this on window focus, and a delta in the set
-	/// invalidates the heavyweight `forgeAccounts` cache.
-	forgeLogins: (provider: string, host: string) =>
-		["forgeLogins", provider, host] as const,
 	inboxItemDetail: (
 		provider: string,
 		login: string,
@@ -161,6 +163,7 @@ export const helmorQueryKeys = {
 	slackEmojiMap: (teamId: string) => ["slackEmojiMap", teamId] as const,
 	triageConfig: ["triage", "config"] as const,
 	triageActiveStatus: ["triage", "activeStatus"] as const,
+	pairedDevices: ["pairedDevices"] as const,
 };
 
 /** Persistence is opt-in per `queryOptions` via `meta: { persist: true }`.
@@ -684,7 +687,26 @@ export function sessionThreadMessagesQueryOptions(sessionId: string) {
 		// working unchanged.
 		queryFn: () => loadSessionThreadMessages(sessionId),
 		gcTime: SESSION_GC_TIME,
-		staleTime: SESSION_STALE_TIME,
+		// Threads never go stale by clock — every write path broadcasts a
+		// `sessionTurnPersisted` / `sessionMessagesAppended` UiMutationEvent
+		// that marks this key stale explicitly. Keeps warm revisits and
+		// window-focus refetches at zero IPC.
+		staleTime: Number.POSITIVE_INFINITY,
+		// Reuse per-message references on refetch via the same helper the
+		// streaming writes use, so per-message memos bail out. First fetch
+		// passes `oldData === undefined` and must flow straight through —
+		// `shareMessages` iterates prev unconditionally. Note: a key whose
+		// first write comes from `setQueryData` before any observer mounts
+		// is built with default options (default structural sharing for
+		// that one write) — known and fine; this fn applies once an
+		// observer mounts with these options.
+		structuralSharing: (oldData, newData) =>
+			oldData == null
+				? newData
+				: shareMessages(
+						oldData as ThreadMessageLike[],
+						newData as ThreadMessageLike[],
+					),
 	});
 }
 

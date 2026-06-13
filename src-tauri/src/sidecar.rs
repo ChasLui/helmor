@@ -80,6 +80,14 @@ struct SidecarProcess {
 pub struct BundledAgentPaths {
     pub claude_bin: Option<PathBuf>,
     pub codex_bin: Option<PathBuf>,
+    pub opencode_bin: Option<PathBuf>,
+    /// MiMo Code (opencode fork) — `vendor/mimo/mimo`.
+    pub mimo_bin: Option<PathBuf>,
+    /// Node runtime that runs the cursor worker (Cursor's `@cursor/sdk` can't
+    /// run on Bun — its HTTP/2 hits `NGHTTP2_FRAME_SIZE_ERROR` in git repos).
+    pub node_bin: Option<PathBuf>,
+    /// Built `cursor-worker.mjs` entry, run by `node_bin`.
+    pub cursor_worker: Option<PathBuf>,
 }
 
 /// Resolve the bundled Claude/Codex CLI binaries shipped inside the
@@ -110,21 +118,43 @@ pub fn load_cursor_api_key() -> Option<String> {
 
 fn resolve_bundled_agent_paths_for_exe(exe: &std::path::Path) -> Option<BundledAgentPaths> {
     let exe_dir = exe.parent()?;
-    let contents_dir = exe_dir.parent()?;
-    let resources_dir = contents_dir.join("Resources");
+    // Resource layouts differ per platform: Windows (NSIS/MSI) installs
+    // resources next to the exe, while macOS puts them in
+    // `<bundle>/Contents/Resources`. Probe both roots so the same logic
+    // works everywhere (mirrors `forge::bundled`).
+    let mut resource_roots = vec![exe_dir.to_path_buf()];
+    if let Some(contents_dir) = exe_dir.parent() {
+        resource_roots.push(contents_dir.join("Resources"));
+    }
+
     let claude_bin_name = if cfg!(windows) {
         "claude.exe"
     } else {
         "claude"
     };
     let codex_bin_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+    let opencode_bin_name = if cfg!(windows) {
+        "opencode.exe"
+    } else {
+        "opencode"
+    };
+    let mimo_bin_name = if cfg!(windows) { "mimo.exe" } else { "mimo" };
+    let node_bin_name = if cfg!(windows) { "node.exe" } else { "node" };
 
-    let claude_bin = resources_dir.join(format!("vendor/claude-code/{claude_bin_name}"));
-    let codex_bin = resources_dir.join(format!("vendor/codex/{codex_bin_name}"));
+    let find = |relative: String| {
+        resource_roots
+            .iter()
+            .map(|root| root.join(&relative))
+            .find(|path| path.is_file())
+    };
 
     Some(BundledAgentPaths {
-        claude_bin: claude_bin.is_file().then_some(claude_bin),
-        codex_bin: codex_bin.is_file().then_some(codex_bin),
+        claude_bin: find(format!("vendor/claude-code/{claude_bin_name}")),
+        codex_bin: find(format!("vendor/codex/{codex_bin_name}")),
+        opencode_bin: find(format!("vendor/opencode/{opencode_bin_name}")),
+        mimo_bin: find(format!("vendor/mimo/{mimo_bin_name}")),
+        node_bin: find(format!("vendor/node/{node_bin_name}")),
+        cursor_worker: find("vendor/cursor-worker/cursor-worker.mjs".to_string()),
     })
 }
 
@@ -140,13 +170,12 @@ impl SidecarProcess {
         let is_dev = sidecar_path.extension().is_some_and(|ext| ext == "ts");
 
         let mut cmd = if is_dev {
-            let mut c = Command::new("bun");
+            let mut c = Command::new(crate::platform::executable::resolve_for_spawn("bun"));
             c.arg("run").arg(&sidecar_path);
-            // Anchor cwd to sidecar/ so Bun discovers `bunfig.toml` and
-            // applies the preload that registers our build-time plugins
-            // (sqlite3 shim + cursor SDK chunk) at runtime. Without this
-            // the sidecar inherits Tauri's cwd and the preload never runs,
-            // so loading @cursor/sdk crashes on the native sqlite3 addon.
+            // Anchor cwd to sidecar/ so the cursor proxy resolves the worker at
+            // `dist/cursor-worker.mjs` and Node finds @cursor/sdk in
+            // `sidecar/node_modules`. Without this the sidecar inherits Tauri's
+            // cwd and the dev worker can't be located.
             if let Some(sidecar_root) = sidecar_path.parent().and_then(|p| p.parent()) {
                 c.current_dir(sidecar_root);
             }
@@ -159,11 +188,9 @@ impl SidecarProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
 
-        // Put the sidecar in its own process group so SIGTERM/SIGKILL
-        // reaches all child processes (Claude CLI, Codex CLI) instead
-        // of only hitting the Bun parent.
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+        // Put the sidecar in its own process tree so termination reaches
+        // Claude/Codex/OpenCode children instead of only hitting Bun.
+        crate::platform::process::configure_tree_root(&mut cmd);
 
         // Pass log config to the sidecar process
         if let Ok(dir) = crate::data_dir::logs_dir() {
@@ -182,6 +209,10 @@ impl SidecarProcess {
                 exe = ?exe,
                 claude_bin = ?bundled_paths.claude_bin,
                 codex_bin = ?bundled_paths.codex_bin,
+                opencode_bin = ?bundled_paths.opencode_bin,
+                mimo_bin = ?bundled_paths.mimo_bin,
+                node_bin = ?bundled_paths.node_bin,
+                cursor_worker = ?bundled_paths.cursor_worker,
                 "Resolved bundled agent paths"
             );
             if let Some(path) = bundled_paths.claude_bin {
@@ -189,6 +220,21 @@ impl SidecarProcess {
             }
             if let Some(path) = bundled_paths.codex_bin {
                 cmd.env("HELMOR_CODEX_BIN_PATH", &path);
+            }
+            if let Some(path) = bundled_paths.opencode_bin {
+                cmd.env("HELMOR_OPENCODE_BIN_PATH", &path);
+            }
+            if let Some(path) = bundled_paths.mimo_bin {
+                cmd.env("HELMOR_MIMO_BIN_PATH", &path);
+            }
+            // Cursor runs in a Node child process spawned by the sidecar; point
+            // it at the bundled Node + worker entry. Dev resolves both itself
+            // (node on PATH, sidecar/dist/cursor-worker.mjs).
+            if let Some(path) = bundled_paths.node_bin {
+                cmd.env("HELMOR_NODE_BIN_PATH", &path);
+            }
+            if let Some(path) = bundled_paths.cursor_worker {
+                cmd.env("HELMOR_CURSOR_WORKER_PATH", &path);
             }
         }
         // Cursor key is NOT env-passed — pushed via `updateConfig` RPC
@@ -272,9 +318,10 @@ impl SidecarProcess {
     /// `ManagedSidecar::shutdown`. Kill the whole process group first so
     /// child CLIs don't get reparented to launchd as orphans.
     fn kill(&mut self) {
-        unsafe {
-            libc::kill(-(self.pid() as libc::pid_t), libc::SIGKILL);
-        }
+        // Kill the whole tree first so child CLIs aren't reparented as orphans.
+        crate::platform::process::kill_tree(crate::platform::process::ProcessTree::from_child_pid(
+            self.pid(),
+        ));
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -301,11 +348,10 @@ impl SidecarProcess {
     /// (negative PID) ensures child CLIs spawned by Bun also receive the
     /// signal.
     fn send_sigterm(&self) {
-        // SAFETY: `pid()` is the live child's PID (== PGID since we set
-        // process_group(0) at spawn). Negative PID targets the whole group.
-        unsafe {
-            libc::kill(-(self.pid() as libc::pid_t), libc::SIGTERM);
-        }
+        // Graceful tree stop: Unix SIGTERM to the group, Windows taskkill /T.
+        crate::platform::process::terminate_tree(
+            crate::platform::process::ProcessTree::from_child_pid(self.pid()),
+        );
     }
 }
 
@@ -961,25 +1007,47 @@ mod tests {
 
     #[test]
     fn bundled_agent_paths_resolve_from_running_app() {
+        // The resolver appends `.exe` on Windows; build the fixture with the
+        // platform-native binary names so the test exercises real resolution.
+        let claude = if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        };
+        let codex = if cfg!(windows) { "codex.exe" } else { "codex" };
+        let opencode = if cfg!(windows) {
+            "opencode.exe"
+        } else {
+            "opencode"
+        };
+        let mimo = if cfg!(windows) { "mimo.exe" } else { "mimo" };
+
         let root = tempfile::tempdir().unwrap();
         let exe = root.path().join("Helmor.app/Contents/MacOS/Helmor");
         let resources = root.path().join("Helmor.app/Contents/Resources/vendor");
         std::fs::create_dir_all(resources.join("claude-code")).unwrap();
         std::fs::create_dir_all(resources.join("codex")).unwrap();
-        std::fs::write(resources.join("claude-code/claude"), "").unwrap();
-        std::fs::write(resources.join("codex/codex"), "").unwrap();
+        std::fs::create_dir_all(resources.join("opencode")).unwrap();
+        std::fs::create_dir_all(resources.join("mimo")).unwrap();
+        std::fs::write(resources.join("claude-code").join(claude), "").unwrap();
+        std::fs::write(resources.join("codex").join(codex), "").unwrap();
+        std::fs::write(resources.join("opencode").join(opencode), "").unwrap();
+        std::fs::write(resources.join("mimo").join(mimo), "").unwrap();
 
         let paths = resolve_bundled_agent_paths_for_exe(&exe).unwrap();
 
         assert_eq!(
             paths.claude_bin.unwrap(),
-            root.path()
-                .join("Helmor.app/Contents/Resources/vendor/claude-code/claude")
+            resources.join("claude-code").join(claude)
         );
         assert_eq!(
             paths.codex_bin.unwrap(),
-            root.path()
-                .join("Helmor.app/Contents/Resources/vendor/codex/codex")
+            resources.join("codex").join(codex)
         );
+        assert_eq!(
+            paths.opencode_bin.unwrap(),
+            resources.join("opencode").join(opencode)
+        );
+        assert_eq!(paths.mimo_bin.unwrap(), resources.join("mimo").join(mimo));
     }
 }

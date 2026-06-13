@@ -55,6 +55,15 @@ pub(super) enum StreamingBlock {
 }
 
 pub(super) fn handle_stream_event(acc: &mut StreamAccumulator, value: &Value) {
+    // Track the streaming turn's parent so `build_partial_from_blocks` can
+    // tag the partial as a `child:` of its parent Task/Agent tool call.
+    // Every event of a turn carries the same `parent_tool_use_id`; `null`
+    // (top-level agent) resets it to `None`.
+    acc.cur_streaming_parent_id = value
+        .get("parent_tool_use_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
     let event = match value.get("event") {
         Some(e) => e,
         None => return,
@@ -318,6 +327,18 @@ pub(super) fn build_partial_from_blocks(
     partial_id: String,
     created_at: String,
 ) -> Option<IntermediateMessage> {
+    // Resolved-id scan walks all of collected[] — only pay for it when a
+    // tool block is actually in flight (thinking/text streaming is the
+    // hot path and never consults it).
+    let has_tool_block = acc
+        .blocks
+        .values()
+        .any(|b| matches!(b, StreamingBlock::ToolUse { .. }));
+    let resolved = if has_tool_block {
+        acc.collect_resolved_tool_use_ids()
+    } else {
+        Default::default()
+    };
     let mut content_blocks = Vec::new();
     for block in acc.blocks.values() {
         match block {
@@ -353,8 +374,21 @@ pub(super) fn build_partial_from_blocks(
                 parsed_input,
                 status,
             } => {
+                // Out-of-order guard (SDK 0.3.x): the finalized `assistant`
+                // block for a tool_use can lag behind its `tool_result`. While
+                // it lags, the block sits half-streamed in `self.blocks` with
+                // no parsed input — rendering it now flashes a phantom
+                // "+0 -0" Edit card next to the real one. Skip it: the
+                // imminent `assistant` event renders the real tool-call.
+                if resolved.contains(tool_use_id) {
+                    continue;
+                }
+                // Prefer parsed input, but fall back to a best-effort parse of
+                // the streamed JSON so a still-streaming Edit shows its real
+                // diff instead of "+0 -0" the moment the JSON completes.
                 let input = parsed_input
                     .clone()
+                    .or_else(|| serde_json::from_str::<Value>(input_json_text).ok())
                     .unwrap_or_else(|| serde_json::json!({}));
                 // ToolCall's part id is its `tool_use_id` — no separate
                 // `__part_id` needed, adapter reads `tool_call_id` directly.
@@ -376,7 +410,7 @@ pub(super) fn build_partial_from_blocks(
         return None;
     }
 
-    let parsed = serde_json::json!({
+    let mut parsed = serde_json::json!({
         "type": "assistant",
         "message": {
             "type": "message",
@@ -385,6 +419,13 @@ pub(super) fn build_partial_from_blocks(
         },
         "__streaming": true,
     });
+
+    // Tag subagent partials with their parent so the adapter mints a
+    // `child:<pt>:<turn>` id — keeps the live partial nested under its
+    // parent Task/Agent tool call instead of flashing as a top-level bubble.
+    if let Some(parent) = acc.cur_streaming_parent_id.as_deref() {
+        parsed["parent_tool_use_id"] = Value::String(parent.to_string());
+    }
 
     Some(IntermediateMessage {
         id: partial_id,
@@ -442,8 +483,11 @@ pub(super) fn build_materialized_partial_from_blocks(
                 parsed_input,
                 status,
             } => {
+                // Same best-effort parse as the live partial: without it an
+                // abort mid-input persists an `input: {}` "+0 -0" card.
                 let input = parsed_input
                     .clone()
+                    .or_else(|| serde_json::from_str::<Value>(input_json_text).ok())
                     .unwrap_or_else(|| serde_json::json!({}));
                 content_blocks.push(serde_json::json!({
                     "type": "tool_use",
@@ -461,7 +505,7 @@ pub(super) fn build_materialized_partial_from_blocks(
         return None;
     }
 
-    let parsed = serde_json::json!({
+    let mut parsed = serde_json::json!({
         "type": "assistant",
         "message": {
             "type": "message",
@@ -469,6 +513,12 @@ pub(super) fn build_materialized_partial_from_blocks(
             "content": content_blocks,
         },
     });
+
+    // Keep an aborted subagent turn folded under its parent tool call (and
+    // persisted that way) instead of orphaning it at the top level.
+    if let Some(parent) = acc.cur_streaming_parent_id.as_deref() {
+        parsed["parent_tool_use_id"] = Value::String(parent.to_string());
+    }
 
     Some(IntermediateMessage {
         id: partial_id,
@@ -511,7 +561,7 @@ pub(super) fn build_partial_fallback(
         }));
     }
 
-    let parsed = serde_json::json!({
+    let mut parsed = serde_json::json!({
         "type": "assistant",
         "message": {
             "type": "message",
@@ -520,6 +570,9 @@ pub(super) fn build_partial_fallback(
         },
         "__streaming": true,
     });
+    if let Some(parent) = acc.cur_streaming_parent_id.as_deref() {
+        parsed["parent_tool_use_id"] = Value::String(parent.to_string());
+    }
 
     IntermediateMessage {
         id: partial_id,
@@ -561,7 +614,7 @@ pub(super) fn build_materialized_partial_fallback(
         }));
     }
 
-    let parsed = serde_json::json!({
+    let mut parsed = serde_json::json!({
         "type": "assistant",
         "message": {
             "type": "message",
@@ -569,6 +622,9 @@ pub(super) fn build_materialized_partial_fallback(
             "content": content,
         },
     });
+    if let Some(parent) = acc.cur_streaming_parent_id.as_deref() {
+        parsed["parent_tool_use_id"] = Value::String(parent.to_string());
+    }
 
     Some(IntermediateMessage {
         id: partial_id,

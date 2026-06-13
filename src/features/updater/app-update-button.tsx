@@ -1,4 +1,3 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { Download, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -10,6 +9,7 @@ import {
 } from "@/components/ui/tooltip";
 import type { AppUpdateStatus } from "@/lib/api";
 import { installDownloadedAppUpdate } from "@/lib/api";
+import { openUrl } from "@/lib/platform-bridge";
 import { cn } from "@/lib/utils";
 
 type AppUpdateButtonProps = {
@@ -31,12 +31,11 @@ export function AppUpdateButton({ status, className }: AppUpdateButtonProps) {
 			<TooltipTrigger asChild>
 				<Button
 					type="button"
-					variant="ghost"
+					variant="default"
 					size="xs"
 					aria-label={`Update Helmor to ${update.version}`}
 					className={cn(
-						"h-6 gap-1 rounded-sm px-1.5 text-mini font-medium tracking-[0.01em] text-muted-foreground transition-[background-color,color,border-color,box-shadow] duration-200 hover:bg-accent/60 hover:text-foreground dark:hover:bg-muted/45",
-						"relative overflow-hidden shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--border)_36%,transparent)] hover:shadow-[inset_0_0_0_1px_color-mix(in_srgb,var(--foreground)_12%,transparent)]",
+						"h-6 gap-1 rounded-sm px-1.5 text-mini font-medium tracking-[0.01em] transition-[background-color,color,border-color,box-shadow] duration-200 hover:bg-primary/90",
 						className,
 					)}
 					onClick={() => {
@@ -61,9 +60,9 @@ export function AppUpdateButton({ status, className }: AppUpdateButtonProps) {
 					disabled={installing}
 				>
 					{installing ? (
-						<Loader2 className="size-3 animate-spin text-foreground/70" />
+						<Loader2 className="size-3 animate-spin" />
 					) : (
-						<Download className="size-3 text-foreground/72" />
+						<Download className="size-3" />
 					)}
 					<span>Update</span>
 				</Button>

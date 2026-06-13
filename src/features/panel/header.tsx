@@ -24,8 +24,15 @@ import {
 } from "@/components/account-hover-card-content";
 import { BranchPickerPopover } from "@/components/branch-picker";
 import { CachedAvatar } from "@/components/cached-avatar";
+import { TrafficLightSpacer } from "@/components/chrome/traffic-light-spacer";
 import { HelmorThinkingIndicator } from "@/components/helmor-thinking-indicator";
-import { ClaudeIcon, CursorIcon, OpenAIIcon } from "@/components/icons";
+import {
+	ClaudeIcon,
+	CursorIcon,
+	MiMoCodeIcon,
+	OpenAIIcon,
+	OpenCodeIcon,
+} from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
 	DropdownMenu,
@@ -59,6 +66,7 @@ import { initialsFor } from "@/lib/initials";
 import {
 	helmorQueryKeys,
 	workspaceAccountProfileQueryOptions,
+	workspaceDetailQueryOptions,
 	workspaceForgeActionStatusQueryOptions,
 } from "@/lib/query-client";
 import type { ContextCard } from "@/lib/sources/types";
@@ -96,6 +104,9 @@ type WorkspacePanelHeaderProps = {
 	onSessionRenamed?: (sessionId: string, title: string) => void;
 	onWorkspaceChanged?: () => void;
 	onRequestCloseSession?: (request: SessionCloseRequest) => void;
+	/** Navigate to another workspace by id (used by the stacked-PR parent
+	 *  chip). Wired from the shell's selection controller. */
+	onSelectWorkspace?: (workspaceId: string) => void;
 	newSessionShortcut?: string | null;
 };
 
@@ -127,6 +138,7 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 	onSessionRenamed,
 	onWorkspaceChanged,
 	onRequestCloseSession,
+	onSelectWorkspace,
 	newSessionShortcut,
 }: WorkspacePanelHeaderProps) {
 	const branchTone = getWorkspaceBranchTone({
@@ -228,6 +240,11 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 					data-tauri-drag-region
 					className="relative z-0 flex min-w-0 flex-1 items-center gap-2 overflow-hidden text-small"
 				>
+					<TrafficLightSpacer
+						side="left"
+						width={48}
+						className="hidden max-[960px]:block"
+					/>
 					{headerLeading}
 					{workspace?.mode === "chat" ? (
 						<span className="inline-flex items-center gap-1.5 overflow-hidden px-1 py-0.5 font-medium text-foreground">
@@ -349,7 +366,15 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 									</>
 								)}
 							</span>
-							{workspace?.intendedTargetBranch ? (
+							{workspace?.parentWorkspaceId ? (
+								<StackParentChip
+									parentWorkspaceId={workspace.parentWorkspaceId}
+									fallbackBranch={workspace.intendedTargetBranch}
+									displayRemote={workspace.remote ?? "origin"}
+									archived={workspace.state === "archived"}
+									onSelectWorkspace={onSelectWorkspace}
+								/>
+							) : workspace?.intendedTargetBranch ? (
 								<>
 									<ArrowRight
 										className="relative top-px size-3 shrink-0 self-center text-muted-foreground"
@@ -390,10 +415,10 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 												if (previousDetail) {
 													queryClient.setQueryData<WorkspaceDetail | null>(
 														detailKey,
-														{
+														() => ({
 															...previousDetail,
 															intendedTargetBranch: branch,
-														},
+														}),
 													);
 												}
 
@@ -644,7 +669,7 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 															) : null}
 														</span>
 														{!isEditing ? (
-															<span className="pointer-events-none invisible absolute inset-y-0 right-0 flex items-center gap-0.5 pr-1 group-hover/tab:pointer-events-auto group-hover/tab:visible group-focus-within/tab:pointer-events-auto group-focus-within/tab:visible">
+															<span className="pointer-events-none invisible absolute inset-y-0 right-0 flex items-center gap-0.5 pr-1 group-hover/tab:pointer-events-auto group-hover/tab:visible">
 																<span
 																	role="button"
 																	aria-label="Rename session"
@@ -705,7 +730,7 @@ export const WorkspacePanelHeader = memo(function WorkspacePanelHeader({
 					<TooltipTrigger asChild>
 						<Button
 							aria-label="New session"
-							onClick={sessionActions.createSession}
+							onClick={() => void sessionActions.createSession()}
 							variant="ghost"
 							size="icon-sm"
 							className="ml-0.5 shrink-0 text-muted-foreground hover:bg-accent/60 hover:text-foreground"
@@ -841,6 +866,12 @@ function SessionProviderIcon({
 	if (agentType === "cursor") {
 		return <CursorIcon className="size-3 shrink-0 text-muted-foreground" />;
 	}
+	if (agentType === "opencode") {
+		return <OpenCodeIcon className="size-3 shrink-0 text-muted-foreground" />;
+	}
+	if (agentType === "mimo") {
+		return <MiMoCodeIcon className="size-3 shrink-0 text-muted-foreground" />;
+	}
 	return <ClaudeIcon className="size-3 shrink-0 text-muted-foreground" />;
 }
 
@@ -861,6 +892,76 @@ function displayTooltipTitle(title: string): string {
 		.slice(0, SESSION_TITLE_TOOLTIP_MAX_CHARS - 3)
 		.join("")
 		.trimEnd()}...`;
+}
+
+// StackParentChip: for a stacked-PR child, replaces the target-branch picker
+// with a live "→ <parent workspace title>" chip that navigates to the parent.
+// The parent's title comes from its own (cached, auto-invalidated) detail
+// query, so renaming the parent updates this chip in place — and the click
+// never points at a stale branch string the way the raw target name could.
+function StackParentChip({
+	parentWorkspaceId,
+	fallbackBranch,
+	displayRemote,
+	archived,
+	onSelectWorkspace,
+}: {
+	parentWorkspaceId: string;
+	fallbackBranch?: string | null;
+	displayRemote: string;
+	archived: boolean;
+	onSelectWorkspace?: (workspaceId: string) => void;
+}) {
+	const parentQuery = useQuery(workspaceDetailQueryOptions(parentWorkspaceId));
+	const parent = parentQuery.data ?? null;
+	const label = parent?.title?.trim() || fallbackBranch || "base";
+	const branchHint = parent?.branch ?? fallbackBranch ?? null;
+	const chipInner = (
+		<>
+			<Layers className="size-3 shrink-0" strokeWidth={1.8} />
+			<span className="block min-w-0 truncate">{label}</span>
+		</>
+	);
+	return (
+		<>
+			<ArrowRight
+				className="relative top-px size-3 shrink-0 self-center text-muted-foreground"
+				strokeWidth={1.8}
+			/>
+			<Tooltip>
+				<TooltipTrigger asChild>
+					{archived ? (
+						<span className="inline-flex min-w-0 max-w-[200px] items-center gap-1 px-1 py-0.5 font-medium text-muted-foreground">
+							{chipInner}
+						</span>
+					) : (
+						<Button
+							type="button"
+							variant="ghost"
+							size="xs"
+							onClick={() => onSelectWorkspace?.(parentWorkspaceId)}
+							className="h-6 min-w-0 max-w-[200px] gap-1 rounded-md px-1.5 text-ui font-medium text-muted-foreground hover:text-foreground"
+						>
+							{chipInner}
+						</Button>
+					)}
+				</TooltipTrigger>
+				<TooltipContent
+					side="bottom"
+					sideOffset={4}
+					className="max-w-[260px] flex-col items-start rounded-md px-2 py-1.5 text-left text-mini leading-snug"
+				>
+					{branchHint ? (
+						<span className="block text-background/70">
+							Base branch {displayRemote}/{branchHint}
+						</span>
+					) : (
+						<span className="block text-background/70">Stacked on {label}</span>
+					)}
+				</TooltipContent>
+			</Tooltip>
+		</>
+	);
 }
 
 // BranchPicker: thin wrapper around shared BranchPickerPopover with header trigger styling.

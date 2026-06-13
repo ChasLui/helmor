@@ -79,7 +79,6 @@ export const WorkspacesSidebarContainer = memo(
 			onAddRepositoryNeedsStart,
 			pushWorkspaceToast,
 		});
-
 		return (
 			<WorkspacesSidebar
 				groups={groups}

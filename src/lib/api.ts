@@ -1,7 +1,10 @@
-import { Channel, invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { InspectorFileItem } from "./editor-session";
 import { type ErrorCode, extractError } from "./errors";
+// `invoke` / `Channel` / `listen` route through the transport shim so the same
+// frontend works in the desktop Tauri webview AND when served to a phone
+// browser by the companion server. See `src/lib/ipc.ts`.
+import { Channel, closeChannel, invoke, listen, type UnlistenFn } from "./ipc";
 import { setSessionThreadPaginationState } from "./session-thread-pagination";
 
 export type GroupTone =
@@ -113,6 +116,29 @@ export type WorkspaceRow = {
 	kind?: string;
 	/** True for an ai_triage row still awaiting the user's first send. */
 	triagePrimingUnconsumed?: boolean;
+	/** Originating triage platform for ai_triage rows: "github" | "gitlab" |
+	 *  "slack" | "lark". Absent/null for manual workspaces. Drives the
+	 *  source-logo badge shown on AI-proposed sidebar rows. */
+	triageSourceType?: string | null;
+	/** Stacked PRs: `id` of the workspace one layer below this in a PR stack
+	 *  (its base). Absent/null for non-stacked rows. Drives sidebar stack
+	 *  grouping — the sidebar nests a stack's members under their tip. */
+	parentWorkspaceId?: string | null;
+};
+
+/** Per-row stacked-PR connector metadata, attached by the frontend
+ *  projection (`nestStacks`) — never sent by the backend. Lets the row
+ *  renderer draw the stack-link affordance. */
+export type StackRowMeta = {
+	/** `tip` = newest member (top of the stack, keeps its natural sort slot);
+	 *  `root` = base-most visible member; `mid` = in between. */
+	role: "tip" | "mid" | "root";
+	/** 0 at the tip, increasing toward the base of the stack. */
+	depth: number;
+	/** Total number of members in this stack — used for the "k of N" tooltip. */
+	stackSize: number;
+	/** `id` of the stack's tip — the anchor every member is grouped under. */
+	tipId: string;
 };
 
 export type WorkspaceGroup = {
@@ -120,6 +146,10 @@ export type WorkspaceGroup = {
 	label: string;
 	tone: GroupTone;
 	rows: WorkspaceRow[];
+	/** Frontend-only projection annotation (populated by `nestStacks`, absent
+	 *  on backend payloads): stacked-PR connector metadata keyed by row id,
+	 *  present only for rows that belong to a multi-member stack. */
+	stackMeta?: ReadonlyMap<string, StackRowMeta>;
 };
 
 export type DataInfo = {
@@ -129,7 +159,7 @@ export type DataInfo = {
 	archiveRoot: string;
 };
 
-export type AgentProvider = "claude" | "codex" | "cursor";
+export type AgentProvider = "claude" | "codex" | "cursor" | "opencode" | "mimo";
 
 export type LocalLlmStatus = {
 	enabled: boolean;
@@ -166,14 +196,9 @@ export type AgentModelSection = {
 	options: AgentModelOption[];
 };
 
-/** Wire strings the sidecars accept for permission mode. The composer's
- *  permission-mode dropdown reads {@link ProviderCapabilities.permissionModes}
- *  to decide which entries to render — every provider supports `default`. */
-export type PermissionModeLiteral =
-	| "default"
-	| "acceptEdits"
-	| "plan"
-	| "bypassPermissions";
+/** Wire strings the sidecars accept for permission mode. Helmor models
+ *  permission as a binary: `plan` (read-only) or full access. */
+export type PermissionModeLiteral = "plan" | "bypassPermissions";
 
 /** Static capability table for a single provider. Mirrors the Rust
  *  `agents::provider_capabilities::ProviderCapabilities` shape so a
@@ -188,7 +213,12 @@ export type ProviderCapabilities = {
 	supportsSteer: boolean;
 	supportsSlashCommands: boolean;
 	requiresApiKey: boolean;
-	permissionModes: PermissionModeLiteral[];
+};
+
+/** UTF-16 code-unit range of one pasted-text tag inside a prompt string. */
+export type PastedTextRange = {
+	start: number;
+	end: number;
 };
 
 export type AgentSendRequest = {
@@ -214,6 +244,11 @@ export type AgentSendRequest = {
 	 *  matching `@<path>` substrings out as image attachments without
 	 *  re-parsing the text — paths may contain whitespace. */
 	images?: string[] | null;
+	/** UTF-16 ranges of pasted-text tag spans inside `prompt` (composer
+	 *  badge pastes — see `locatePastedTextRanges`). Persisted with the
+	 *  user_prompt so those spans render as tag chips; the agent still
+	 *  receives the full prompt text. */
+	pastedTexts?: PastedTextRange[] | null;
 };
 
 export type WorkspaceSummary = {
@@ -359,6 +394,10 @@ export type WorkspaceDetail = {
 	branch?: string | null;
 	initializationParentBranch?: string | null;
 	intendedTargetBranch?: string | null;
+	/** Stacked-PR parent link. When set, the header renders a live
+	 * "→ <parent title>" chip (click to navigate) instead of the raw
+	 * target-branch picker. */
+	parentWorkspaceId?: string | null;
 	mode: WorkspaceMode;
 	pinnedAt?: string | null;
 	prTitle?: string | null;
@@ -406,6 +445,9 @@ export type WorkspaceSessionSummary = {
 	 * inspector commit button (e.g. "create-pr", "commit-and-push"). Drives
 	 * post-stream verifiers and auto-close behavior. */
 	actionKind?: ActionKind | null;
+	/** "gui" (SDK chat session) or "terminal" (live PTY in the message area).
+	 * Optional for test mocks / optimistic rows; absent is treated as "gui". */
+	sessionKind?: "gui" | "terminal";
 	active: boolean;
 };
 
@@ -592,6 +634,28 @@ export async function listForgeAccounts(
 	} catch (error) {
 		throw new Error(
 			describeInvokeError(error, "Unable to list forge accounts."),
+		);
+	}
+}
+
+/** Auth verdict for a workspace's bound forge account. Action points gate
+ * on `"loggedOut"`; other states proceed. */
+export type ForgeAuthState =
+	| "loggedIn"
+	| "loggedOut"
+	| "indeterminate"
+	| "notApplicable";
+
+export async function checkWorkspaceForgeAuth(
+	workspaceId: string,
+): Promise<ForgeAuthState> {
+	try {
+		return await invoke<ForgeAuthState>("check_workspace_forge_auth", {
+			workspaceId,
+		});
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to check forge authentication."),
 		);
 	}
 }
@@ -784,12 +848,35 @@ export async function installDownloadedAppUpdate(): Promise<AppUpdateStatus> {
 	return invoke<AppUpdateStatus>("install_downloaded_app_update");
 }
 
-export async function syncGlobalHotkey(hotkey: string | null): Promise<void> {
+export type OsGlobalHotkeyId = "global.hotkey" | "quickPanel.hotkey";
+
+export async function syncGlobalHotkey(
+	id: OsGlobalHotkeyId,
+	hotkey: string | null,
+): Promise<void> {
 	try {
-		await invoke<void>("sync_global_hotkey", { hotkey });
+		await invoke<void>("sync_global_hotkey", { id, hotkey });
 	} catch (error) {
 		throw new Error(describeInvokeError(error, "Unable to set global hotkey."));
 	}
+}
+
+export async function toggleQuickPanel(): Promise<void> {
+	return invoke<void>("toggle_quick_panel");
+}
+
+export async function hideQuickPanel(): Promise<void> {
+	return invoke<void>("hide_quick_panel");
+}
+
+export async function revealWorkspaceInMainWindow(
+	workspaceId: string,
+	sessionId: string | null,
+): Promise<void> {
+	return invoke<void>("reveal_workspace_in_main_window", {
+		workspaceId,
+		sessionId,
+	});
 }
 
 export async function listenAppUpdateStatus(
@@ -848,18 +935,49 @@ export async function exitOnboardingWindowMode(): Promise<void> {
 	await invoke("exit_onboarding_window_mode");
 }
 
-export type AgentLoginProvider = "claude" | "codex" | "cursor";
+export async function enterMiniWindowMode(): Promise<void> {
+	await invoke("enter_mini_window_mode");
+}
+
+export async function exitMiniWindowMode(): Promise<void> {
+	await invoke("exit_mini_window_mode");
+}
+
+export async function toggleMiniWindowMode(): Promise<boolean> {
+	return await invoke("toggle_mini_window_mode");
+}
+
+export type AgentLoginProvider =
+	| "claude"
+	| "codex"
+	| "cursor"
+	| "opencode"
+	| "mimo";
 
 export type AgentLoginStatusResult = {
 	claude: boolean;
 	codex: boolean;
 	cursor: boolean;
+	opencode: boolean;
+	mimo: boolean;
 	codexProvider?: string | null;
 	codexAuthMethod?: "login" | "apiKey" | string | null;
 };
 
 export async function getAgentLoginStatus(): Promise<AgentLoginStatusResult> {
 	return await invoke<AgentLoginStatusResult>("get_agent_login_status");
+}
+
+// Cursor is an SDK (no versioned CLI), so it has no entry.
+export type AgentVersionsResult = {
+	claude: string | null;
+	codex: string | null;
+	opencode: string | null;
+	mimo: string | null;
+};
+
+export async function getAgentVersions(): Promise<AgentVersionsResult> {
+	return await invoke<AgentVersionsResult>("get_agent_versions");
 }
 
 export async function openAgentLoginTerminal(
@@ -928,6 +1046,14 @@ export type DevResetResult = {
 
 export async function requestQuit(force: boolean): Promise<void> {
 	return await invoke("request_quit", { force });
+}
+
+// Close (hide) the main window. Routes through the Rust `CloseRequested`
+// interceptor, which on macOS hides the window and keeps the app running in
+// the Dock (reopened by clicking the Dock icon). Used by Cmd+W on the last
+// tab and by Cmd+Shift+W.
+export async function closeMainWindow(): Promise<void> {
+	await getCurrentWindow().close();
 }
 
 export async function devResetAllData(): Promise<DevResetResult> {
@@ -1045,7 +1171,6 @@ export const DEFAULT_PROVIDER_CAPABILITIES: ProviderCapabilities[] = [
 		supportsSteer: true,
 		supportsSlashCommands: true,
 		requiresApiKey: false,
-		permissionModes: ["default", "acceptEdits", "plan", "bypassPermissions"],
 	},
 	{
 		provider: "codex",
@@ -1056,18 +1181,37 @@ export const DEFAULT_PROVIDER_CAPABILITIES: ProviderCapabilities[] = [
 		supportsSteer: true,
 		supportsSlashCommands: true,
 		requiresApiKey: false,
-		permissionModes: ["default", "bypassPermissions"],
 	},
 	{
 		provider: "cursor",
 		displayName: "Cursor",
-		supportsPlanMode: false,
+		supportsPlanMode: true,
 		supportsActiveGoal: false,
 		supportsContextUsage: false,
 		supportsSteer: false,
 		supportsSlashCommands: true,
 		requiresApiKey: true,
-		permissionModes: ["default"],
+	},
+	{
+		provider: "opencode",
+		displayName: "OpenCode",
+		supportsPlanMode: true,
+		supportsActiveGoal: false,
+		supportsContextUsage: true,
+		supportsSteer: true,
+		supportsSlashCommands: true,
+		requiresApiKey: false,
+	},
+	// MiMo Code is an opencode-protocol fork — identical capability surface.
+	{
+		provider: "mimo",
+		displayName: "MiMo Code",
+		supportsPlanMode: true,
+		supportsActiveGoal: false,
+		supportsContextUsage: true,
+		supportsSteer: true,
+		supportsSlashCommands: true,
+		requiresApiKey: false,
 	},
 ];
 
@@ -1112,6 +1256,138 @@ export async function listCursorModels(
 	} catch (error) {
 		throw new Error(
 			describeInvokeError(error, "Unable to list Cursor models."),
+		);
+	}
+}
+
+export type OpencodeModelEntry = {
+	// `<providerID>/<modelID>` slug — doubles as the cliModel.
+	id: string;
+	label: string;
+	// Effort tiers (the model's `variants` keys). Empty ⟺ no effort switch.
+	effortLevels?: string[];
+};
+
+// `forceReload` restarts the opencode server to pick up config changes.
+export async function listOpencodeModels(
+	forceReload = false,
+): Promise<OpencodeModelEntry[]> {
+	try {
+		return await invoke<OpencodeModelEntry[]>("list_opencode_models", {
+			forceReload,
+		});
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to list opencode models."),
+		);
+	}
+}
+
+export type OpencodeCustomModel = {
+	id: string;
+	name: string;
+	// Only set true when the upstream endpoint accepts a reasoning effort.
+	reasoning: boolean;
+};
+
+export type OpencodeCustomProvider = {
+	id: string;
+	name: string;
+	// `@ai-sdk/openai-compatible` (/v1/chat/completions) or `@ai-sdk/openai` (/v1/responses).
+	npm: string;
+	baseUrl: string;
+	apiKey: string;
+	headers: Record<string, string>;
+	models: OpencodeCustomModel[];
+};
+
+export async function getOpencodeCustomProviders(): Promise<
+	OpencodeCustomProvider[]
+> {
+	try {
+		return await invoke<OpencodeCustomProvider[]>(
+			"get_opencode_custom_providers",
+		);
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to read opencode config."),
+		);
+	}
+}
+
+// `preset` sets only `options.apiKey` (opencode fills npm/baseURL/models);
+// non-preset writes the full custom block.
+export async function upsertOpencodeCustomProvider(
+	provider: OpencodeCustomProvider,
+	preset: boolean,
+): Promise<void> {
+	try {
+		await invoke("upsert_opencode_custom_provider", { provider, preset });
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to save opencode provider."),
+		);
+	}
+}
+
+export async function deleteOpencodeCustomProvider(id: string): Promise<void> {
+	try {
+		await invoke("delete_opencode_custom_provider", { id });
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to delete opencode provider."),
+		);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// MiMo Code (opencode-protocol fork) — same shapes, its own config file.
+// ---------------------------------------------------------------------------
+
+// `forceReload` restarts the mimo server to pick up config changes.
+export async function listMimoModels(
+	forceReload = false,
+): Promise<OpencodeModelEntry[]> {
+	try {
+		return await invoke<OpencodeModelEntry[]>("list_mimo_models", {
+			forceReload,
+		});
+	} catch (error) {
+		throw new Error(describeInvokeError(error, "Unable to list mimo models."));
+	}
+}
+
+export async function getMimoCustomProviders(): Promise<
+	OpencodeCustomProvider[]
+> {
+	try {
+		return await invoke<OpencodeCustomProvider[]>("get_mimo_custom_providers");
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to read MiMo Code config."),
+		);
+	}
+}
+
+export async function upsertMimoCustomProvider(
+	provider: OpencodeCustomProvider,
+	preset: boolean,
+): Promise<void> {
+	try {
+		await invoke("upsert_mimo_custom_provider", { provider, preset });
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to save MiMo Code provider."),
+		);
+	}
+}
+
+export async function deleteMimoCustomProvider(id: string): Promise<void> {
+	try {
+		await invoke("delete_mimo_custom_provider", { id });
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to delete MiMo Code provider."),
 		);
 	}
 }
@@ -1818,7 +2094,7 @@ export type SlackImportResult = {
 	alreadyConnected: SlackWorkspace[];
 };
 
-/** Read the user's local Slack desktop session (macOS only in v1) and
+/** Read the user's local Slack desktop session (currently wired on macOS) and
  *  import every workspace whose token still authenticates. Strictly
  *  better UX than the webview-based connect flow when it works because
  *  it reuses whatever auth state Slack desktop already negotiated —
@@ -2005,6 +2281,7 @@ export type UiMutationEvent =
 	| { type: "codexGoalChanged"; sessionId: string }
 	| { type: "sessionPlanChanged"; sessionId: string }
 	| { type: "sessionMessagesAppended"; sessionId: string }
+	| { type: "sessionTurnPersisted"; sessionId: string }
 	| { type: "workspaceFilesChanged"; workspaceId: string }
 	| { type: "workspaceGitStateChanged"; workspaceId: string }
 	| { type: "workspaceForgeChanged"; workspaceId: string }
@@ -2027,7 +2304,20 @@ export type UiMutationEvent =
 	| { type: "triageConfigChanged" }
 	| { type: "triageActiveStatusChanged" }
 	| { type: "triageWorkspaceCreated"; workspaceId: string }
-	| { type: "fastModeUnavailable"; sessionId: string; reason: string };
+	| { type: "fastModeUnavailable"; sessionId: string; reason: string }
+	| { type: "pairedDevicesChanged" }
+	| { type: "terminalSessionIdle"; sessionId: string; workspaceId: string }
+	| {
+			type: "terminalPromptCaptured";
+			sessionId: string;
+			workspaceId: string;
+			prompt: string;
+	  }
+	| {
+			type: "workspaceRevealRequested";
+			workspaceId: string;
+			sessionId: string | null;
+	  };
 
 export type TriageConfig = {
 	enabled: boolean;
@@ -2301,6 +2591,7 @@ export async function subscribeUiMutations(
 	await invoke("subscribe_ui_mutations", { subscriptionId, onEvent });
 	return () => {
 		onEvent.onmessage = () => {};
+		closeChannel(onEvent);
 		void invoke("unsubscribe_ui_mutations", { subscriptionId });
 	};
 }
@@ -2665,7 +2956,12 @@ export type ChangeRequestInfo = {
 	isMerged: boolean;
 };
 
-export type ActionStatusKind = "success" | "pending" | "running" | "failure";
+export type ActionStatusKind =
+	| "success"
+	| "skipped"
+	| "pending"
+	| "running"
+	| "failure";
 export type ActionProvider = "github" | "gitlab" | "vercel" | "unknown";
 export type WorkspaceGitSyncStatus = "upToDate" | "behind" | "unknown";
 export type WorkspacePushStatus = "published" | "unpublished" | "unknown";
@@ -2894,6 +3190,29 @@ export async function permanentlyDeleteWorkspace(
 	workspaceId: string,
 ): Promise<void> {
 	await invoke("permanently_delete_workspace", { workspaceId });
+}
+
+export interface CleanupArchivedFailure {
+	workspaceId: string;
+	title: string;
+	message: string;
+}
+
+export interface CleanupArchivedWorkspacesResponse {
+	deletedCount: number;
+	failures: CleanupArchivedFailure[];
+}
+
+/**
+ * Permanently delete every archived workspace, one at a time, through the
+ * same backend path as `permanentlyDeleteWorkspace`. Resolves when the
+ * whole run finishes; the run is backend-owned, so it completes even if
+ * the caller unmounts mid-flight.
+ */
+export async function cleanupArchivedWorkspaces(): Promise<CleanupArchivedWorkspacesResponse> {
+	return invoke<CleanupArchivedWorkspacesResponse>(
+		"cleanup_archived_workspaces",
+	);
 }
 
 /**
@@ -3250,6 +3569,47 @@ export type FileMentionPart = {
 	id: string;
 	path: string;
 };
+/** A span of the user's prompt that entered the composer as a pasted-text
+ *  tag badge. Renders as the same tag chip (hover previews the content);
+ *  the text itself is still part of the prompt the agent received. */
+export type PastedTextPart = {
+	type: "pasted-text";
+	id: string;
+	text: string;
+};
+/** One option inside a `UserQuestionPart` question. */
+export type UserQuestionOption = {
+	label: string;
+	description?: string | null;
+	preview?: string | null;
+};
+export type UserQuestionItem = {
+	question: string;
+	header?: string | null;
+	multiSelect?: boolean;
+	options?: UserQuestionOption[];
+	/** Whether a free-text "Other" answer is allowed (Codex `isOther`). */
+	allowFreeText?: boolean;
+};
+export type UserQuestionStatus =
+	| "pending"
+	| "answered"
+	| "declined"
+	| "cancelled";
+/**
+ * Normalized agent→user question card — one shape for Claude
+ * AskUserQuestion, Codex `requestUserInput` and OpenCode `question`.
+ * `answers` maps question text → answer string (multi-select answers are
+ * comma-joined labels; free-text answers pass through verbatim).
+ */
+export type UserQuestionPart = {
+	type: "user-question";
+	id: string;
+	source: string;
+	questions: UserQuestionItem[];
+	answers?: Record<string, unknown>;
+	status: UserQuestionStatus;
+};
 export type PlanReviewAllowedPrompt = {
 	tool: string;
 	prompt: string;
@@ -3272,7 +3632,9 @@ export type MessagePart =
 	| ImagePart
 	| PromptSuggestionPart
 	| FileMentionPart
-	| PlanReviewPart;
+	| PastedTextPart
+	| PlanReviewPart
+	| UserQuestionPart;
 
 export type CollapsedGroupPart = {
 	type: "collapsed-group";
@@ -3363,8 +3725,10 @@ export type AgentStreamEvent =
 			source: string;
 			message: string;
 			/** Discriminated by `payload.kind`:
-			 *  - `ask-user-question` → Claude AskUserQuestion (raw multi-question / option / preview shape)
-			 *  - `form` → JSON-Schema form (MCP form elicitation or Codex's synthesized form)
+			 *  - `ask-user-question` → canonical question card (Claude AskUserQuestion,
+			 *    Codex requestUserInput, OpenCode question — normalized by Rust's
+			 *    `pipeline::user_question`, see `UserQuestionItem`)
+			 *  - `form` → JSON-Schema form (MCP form elicitation)
 			 *  - `url` → URL launcher (MCP url-mode elicitation)
 			 *  See `pending-user-input.ts` for the typed payload union. */
 			payload: Record<string, unknown>;
@@ -3645,6 +4009,37 @@ export async function stopAgentStream(
 	});
 }
 
+/**
+ * Attach a read-only *watcher* to a session's live agent stream.
+ *
+ * The client that called `startAgentMessageStream` renders the turn from its
+ * own channel; this lets another client (a second window, or this same SPA
+ * served to a phone via the mobile companion) mirror the SAME turn live. The
+ * callback fires for every `AgentStreamEvent` the driver receives — feed them
+ * through the same render pipeline. Works identically over native Tauri and the
+ * companion HTTP/NDJSON transport. Returns an unlisten to detach.
+ */
+export async function subscribeSessionStream(
+	sessionId: string,
+	callback: (event: AgentStreamEvent) => void,
+): Promise<UnlistenFn> {
+	const subscriptionId = crypto.randomUUID();
+	const onEvent = new Channel<AgentStreamEvent>();
+	onEvent.onmessage = (event) => callback(event);
+	await invoke("subscribe_session_stream", {
+		sessionId,
+		subscriptionId,
+		onEvent,
+	});
+	return () => {
+		onEvent.onmessage = () => {};
+		// Abort the companion fetch so the server frees the watcher and the
+		// browser releases the connection slot (no-op on native Tauri).
+		closeChannel(onEvent);
+		void invoke("unsubscribe_session_stream", { sessionId, subscriptionId });
+	};
+}
+
 /** UI projection of a registered, in-flight agent stream. Mirror of
  *  `agents::streaming::ActiveStreamSummary` on the Rust side. */
 export type ActiveStreamSummary = {
@@ -3816,7 +4211,7 @@ export async function createSession(
 		/** Pin the session row's `model` at creation. Inspector helpers
 		 *  (Create PR/MR, Review) push the user's configured model here so
 		 *  the composer reads it off the row instead of falling back to
-		 *  settings.defaultModelId. Leave null for the default flow. */
+		 *  settings.defaultModel. Leave null for the default flow. */
 		model?: string | null;
 		/** Pin `effort_level` at creation; null falls back to the user
 		 *  setting on the backend. */
@@ -3825,6 +4220,10 @@ export async function createSession(
 		fastMode?: boolean | null;
 		/** Pre-allocated session UUID; see `prepareWorkspaceFromRepo`. */
 		seedSessionId?: string | null;
+		/** "terminal" creates a Terminal session (live PTY); defaults to "gui". */
+		sessionKind?: "gui" | "terminal" | null;
+		/** Pin agent_type at creation (Terminal preset CLI, e.g. "claude"). */
+		agentType?: string | null;
 	},
 ): Promise<CreateSessionResponse> {
 	return invoke<CreateSessionResponse>("create_session", {
@@ -3835,6 +4234,8 @@ export async function createSession(
 		effortLevel: options?.effortLevel ?? null,
 		fastMode: options?.fastMode ?? null,
 		seedSessionId: options?.seedSessionId ?? null,
+		sessionKind: options?.sessionKind ?? null,
+		agentType: options?.agentType ?? null,
 	});
 }
 
@@ -3872,7 +4273,11 @@ export async function generateSessionTitle(
 		return await invoke<GenerateSessionTitleResponse>(
 			"generate_session_title",
 			{
-				request: { sessionId, userMessage, titleSeed: titleSeed ?? null },
+				request: {
+					sessionId,
+					userMessage,
+					titleSeed: titleSeed ?? null,
+				},
 			},
 		);
 	} catch (error) {
@@ -4061,6 +4466,16 @@ export async function unhideSession(sessionId: string): Promise<void> {
 
 export async function deleteSession(sessionId: string): Promise<void> {
 	await invoke("delete_session", { sessionId });
+}
+
+/** Convert a GUI session into a Terminal session in place (one-way). Works on
+ * empty and populated sessions alike — a session that already ran a turn resumes
+ * by its provider session id in the TUI so the same conversation continues. */
+export async function convertSessionToTerminal(
+	sessionId: string,
+	agentType: string,
+): Promise<void> {
+	await invoke("convert_session_to_terminal", { sessionId, agentType });
 }
 
 export async function loadHiddenSessions(
@@ -4379,6 +4794,11 @@ export async function spawnTerminal(
 	workspaceId: string,
 	instanceId: string,
 	onEvent: (event: ScriptEvent) => void,
+	bootCommand?: string | null,
+	agentKind?: string | null,
+	fastMode?: boolean,
+	initialCols?: number | null,
+	initialRows?: number | null,
 ): Promise<void> {
 	const channel = new Channel<ScriptEvent>();
 	channel.onmessage = onEvent;
@@ -4386,6 +4806,11 @@ export async function spawnTerminal(
 		repoId,
 		workspaceId,
 		instanceId,
+		agentKind: agentKind ?? null,
+		bootCommand: bootCommand ?? null,
+		fastMode: fastMode ?? null,
+		initialCols: initialCols ?? null,
+		initialRows: initialRows ?? null,
 		channel,
 	});
 }
@@ -4399,6 +4824,22 @@ export async function stopTerminal(
 		repoId,
 		workspaceId,
 		instanceId,
+	});
+}
+
+/** Mirror a Terminal session's working/idle state into the active-stream
+ * registry (drives the sidebar spinner + completion notification). */
+export async function setTerminalSessionBusy(
+	sessionId: string,
+	workspaceId: string,
+	busy: boolean,
+	provider?: string | null,
+): Promise<void> {
+	await invoke("set_terminal_session_busy", {
+		sessionId,
+		workspaceId,
+		busy,
+		provider: provider ?? null,
 	});
 }
 
@@ -4472,4 +4913,110 @@ export async function findExistingHelmorRepo(): Promise<ExistingHelmorRepo | nul
 
 function describeInvokeError(error: unknown, fallback: string): string {
 	return extractError(error, fallback).message;
+}
+
+// --- Mobile browser companion ----------------------------------------------
+
+/** Companion server + tunnel status. */
+export type CompanionStatus = {
+	running: boolean;
+	/** Loopback address the server is bound to (`127.0.0.1:<port>`). */
+	addr: string | null;
+	/** Public tunnel URL, when a tunnel is up. */
+	publicUrl: string | null;
+	/** `"named"` (stable URL), `"quick"` (ephemeral), or `"none"`. */
+	mode: "named" | "quick" | "none";
+	/** Provisioned stable hostname, if any — independent of running state. */
+	stableHost: string | null;
+	/** Whether the user has signed in to Cloudflare. */
+	signedIn: boolean;
+};
+
+/** One-time payload returned when pairing a device. The phone scans `url`. */
+export type CompanionPairingPayload = {
+	deviceId: string;
+	label: string;
+	/** Plaintext PAT — shown once, never persisted in plaintext. */
+	pat: string;
+	/** Full pairing URL to encode as a QR: `<origin>/#pair=<pat>`. */
+	url: string;
+};
+
+/** A paired phone (active, non-revoked). */
+export type PairedDevice = {
+	id: string;
+	label: string;
+	createdAt: string;
+	lastSeenAt: string | null;
+};
+
+export async function getCompanionStatus(): Promise<CompanionStatus> {
+	return invoke<CompanionStatus>("companion_status");
+}
+
+export async function enableCompanion(): Promise<CompanionStatus> {
+	try {
+		return await invoke<CompanionStatus>("companion_enable");
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to enable the mobile companion."),
+		);
+	}
+}
+
+export async function disableCompanion(): Promise<void> {
+	await invoke<void>("companion_disable");
+}
+
+export async function pairCompanionDevice(
+	label: string,
+): Promise<CompanionPairingPayload> {
+	try {
+		return await invoke<CompanionPairingPayload>("companion_pair_device", {
+			label,
+		});
+	} catch (error) {
+		throw new Error(describeInvokeError(error, "Unable to pair device."));
+	}
+}
+
+export async function listPairedDevices(): Promise<PairedDevice[]> {
+	return (await invoke<PairedDevice[]>("companion_list_devices")) ?? [];
+}
+
+export async function revokePairedDevice(deviceId: string): Promise<void> {
+	await invoke<void>("companion_revoke_device", { deviceId });
+}
+
+/** Open the Cloudflare sign-in flow (browser). Resolves once cert.pem lands. */
+export async function signInCloudflare(): Promise<void> {
+	try {
+		await invoke<void>("companion_sign_in_cloudflare");
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Cloudflare sign-in did not complete."),
+		);
+	}
+}
+
+/** Provision a permanent remote-*.helmor.ai URL and bring it up. */
+export async function allocateStableUrl(): Promise<CompanionStatus> {
+	try {
+		return await invoke<CompanionStatus>("companion_allocate_stable_url");
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to allocate a stable URL."),
+		);
+	}
+}
+
+/** Forget the permanent URL (revoke hostname + tear down). */
+export async function destroyStableUrl(): Promise<CompanionStatus> {
+	try {
+		return await invoke<CompanionStatus>("companion_destroy_stable_url");
+	} catch (error) {
+		throw new Error(
+			describeInvokeError(error, "Unable to forget the stable URL."),
+		);
+	}
 }

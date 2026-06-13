@@ -66,16 +66,14 @@ import { SettingsSelect } from "./components/settings-select";
 import { AccountPanel } from "./panels/account";
 import { AppUpdatesPanel } from "./panels/app-updates";
 import { AppearancePanel } from "./panels/appearance";
+import { ArchiveCleanupPanel } from "./panels/archive-cleanup";
 import { ComponentsPanel } from "./panels/components";
 import { ConductorImportPanel } from "./panels/conductor-import";
-import { CursorProviderPanel } from "./panels/cursor-provider";
 import { DevToolsPanel } from "./panels/dev-tools";
 import { InboxSettingsPanel } from "./panels/inbox";
 import { LocalLlmPanel } from "./panels/local-llm";
-import {
-	AgentProxyPanel,
-	ClaudeCustomProvidersPanel,
-} from "./panels/model-providers";
+import { MobileCompanionPanel } from "./panels/mobile-companion";
+import { ProvidersPanel } from "./panels/providers";
 import { RepositorySettingsPanel } from "./panels/repository-settings";
 import { TriagePanel } from "./panels/triage";
 
@@ -94,6 +92,7 @@ import type { ContextProviderTab, SettingsSection } from "./types";
 /// Most match the section key with a leading capital, but a few names
 /// don't pluralise nicely under that rule — keep the overrides explicit.
 const SECTION_LABEL_OVERRIDES: Partial<Record<SettingsSection, string>> = {
+	model: "Models",
 	account: "Accounts",
 	inbox: "Contexts",
 };
@@ -184,6 +183,7 @@ export const SettingsDialog = memo(function SettingsDialog({
 		"general",
 		"appearance",
 		"model",
+		"providers",
 		"shortcuts",
 		...(conductorEnabled ? (["import"] as const) : []),
 		"account",
@@ -280,8 +280,11 @@ export const SettingsDialog = memo(function SettingsDialog({
 							) : null}
 						</div>
 
-						{/* Content area */}
-						<div className="min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-8 pt-1 pb-6">
+						{/* Content area — `scrollbar-stable` reserves the scrollbar
+						    gutter so expanding/collapsing a provider row (which
+						    toggles the vertical scrollbar) never reflows the body
+						    width, matching the nav's stable gutter. */}
+						<div className="scrollbar-stable min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-8 pt-1 pb-6">
 							{activeSection === "general" && (
 								<SettingsGroup>
 									<SettingsRow
@@ -342,6 +345,18 @@ export const SettingsDialog = memo(function SettingsDialog({
 										/>
 									</SettingsRow>
 									<SettingsRow
+										title="Terminal Mode"
+										releaseMarker={{ kind: "feature" }}
+										description="Adds a composer toggle that opens your prompt in the agent's terminal UI instead of a chat session. Claude and Codex only."
+									>
+										<Switch
+											checked={settings.enableTerminalMode}
+											onCheckedChange={(checked) =>
+												updateSettings({ enableTerminalMode: checked })
+											}
+										/>
+									</SettingsRow>
+									<SettingsRow
 										title="Always show context usage"
 										description="By default, context usage is only shown when more than 70% is used."
 									>
@@ -365,7 +380,6 @@ export const SettingsDialog = memo(function SettingsDialog({
 									</SettingsRow>
 									<SettingsRow
 										title="Auto-archive on merge"
-										releaseMarker={{ kind: "feature" }}
 										description="When a workspace's linked PR/MR is merged, archive the workspace automatically."
 									>
 										<Switch
@@ -500,6 +514,7 @@ export const SettingsDialog = memo(function SettingsDialog({
 											</ToggleGroupItem>
 										</ToggleGroup>
 									</SettingsRow>
+									<ArchiveCleanupPanel />
 									<AppUpdatesPanel />
 									<ComponentsPanel />
 								</SettingsGroup>
@@ -532,14 +547,17 @@ export const SettingsDialog = memo(function SettingsDialog({
 										// dialog open and `hasMaterialized` running — once the
 										// migration lands, stored values are explicit and these
 										// fallbacks no-op.
-										modelId={settings.defaultModelId}
+										modelId={settings.defaultModel?.modelId ?? null}
 										effort={settings.defaultEffort}
 										fastMode={settings.defaultFastMode}
 										ariaPrefix="Default"
 										onChange={(p) => {
 											const patch: Partial<AppSettings> = {};
 											if (p.modelId !== undefined)
-												patch.defaultModelId = p.modelId;
+												patch.defaultModel = {
+													provider: p.provider ?? null,
+													modelId: p.modelId,
+												};
 											if (p.effort !== undefined)
 												patch.defaultEffort = p.effort;
 											if (p.fastMode !== undefined)
@@ -553,7 +571,11 @@ export const SettingsDialog = memo(function SettingsDialog({
 										models={allModels}
 										modelSections={modelSections}
 										isLoadingModels={modelSectionsQuery.isPending}
-										modelId={settings.reviewModelId ?? settings.defaultModelId}
+										modelId={
+											settings.reviewModel?.modelId ??
+											settings.defaultModel?.modelId ??
+											null
+										}
 										effort={settings.reviewEffort ?? settings.defaultEffort}
 										fastMode={
 											settings.reviewFastMode ?? settings.defaultFastMode
@@ -562,7 +584,10 @@ export const SettingsDialog = memo(function SettingsDialog({
 										onChange={(p) => {
 											const patch: Partial<AppSettings> = {};
 											if (p.modelId !== undefined)
-												patch.reviewModelId = p.modelId;
+												patch.reviewModel = {
+													provider: p.provider ?? null,
+													modelId: p.modelId,
+												};
 											if (p.effort !== undefined) patch.reviewEffort = p.effort;
 											if (p.fastMode !== undefined)
 												patch.reviewFastMode = p.fastMode;
@@ -575,24 +600,31 @@ export const SettingsDialog = memo(function SettingsDialog({
 										models={allModels}
 										modelSections={modelSections}
 										isLoadingModels={modelSectionsQuery.isPending}
-										modelId={settings.prModelId ?? settings.defaultModelId}
+										modelId={
+											settings.prModel?.modelId ??
+											settings.defaultModel?.modelId ??
+											null
+										}
 										effort={settings.prEffort ?? settings.defaultEffort}
 										fastMode={settings.prFastMode ?? settings.defaultFastMode}
 										ariaPrefix="Action"
 										onChange={(p) => {
 											const patch: Partial<AppSettings> = {};
-											if (p.modelId !== undefined) patch.prModelId = p.modelId;
+											if (p.modelId !== undefined)
+												patch.prModel = {
+													provider: p.provider ?? null,
+													modelId: p.modelId,
+												};
 											if (p.effort !== undefined) patch.prEffort = p.effort;
 											if (p.fastMode !== undefined)
 												patch.prFastMode = p.fastMode;
 											void updateSettings(patch);
 										}}
 									/>
-									<ClaudeCustomProvidersPanel />
-									<CursorProviderPanel />
-									<AgentProxyPanel />
 								</SettingsGroup>
 							)}
+
+							{activeSection === "providers" && <ProvidersPanel />}
 
 							{activeSection === "experimental" && (
 								<SettingsGroup>
@@ -601,6 +633,7 @@ export const SettingsDialog = memo(function SettingsDialog({
 										updateSettings={updateSettings}
 									/>
 									{settings.localLlm.enabled ? <TriagePanel /> : null}
+									<MobileCompanionPanel />
 								</SettingsGroup>
 							)}
 
@@ -608,9 +641,7 @@ export const SettingsDialog = memo(function SettingsDialog({
 
 							{activeSection === "developer" && <DevToolsPanel />}
 
-							{activeSection === "account" && (
-								<AccountPanel repositories={repositories} />
-							)}
+							{activeSection === "account" && <AccountPanel />}
 
 							{activeSection === "inbox" && (
 								<InboxSettingsPanel
@@ -664,6 +695,9 @@ function effortLabel(level: string): string {
 
 type ModelRowChange = {
 	modelId?: string;
+	/** Provider of the picked model — captured at selection so the stored
+	 *  pref carries it (slug-based providers can't be re-derived from the id). */
+	provider?: string | null;
 	effort?: string;
 	fastMode?: boolean;
 };
@@ -747,7 +781,9 @@ function ModelSettingRow({
 						{models.map((m) => (
 							<DropdownMenuItem
 								key={m.id}
-								onClick={() => onChange({ modelId: m.id })}
+								onClick={() =>
+									onChange({ modelId: m.id, provider: m.provider })
+								}
 								className="justify-between gap-2"
 							>
 								<span className="flex min-w-0 items-center gap-2">

@@ -11,6 +11,7 @@ import crypto from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { ActiveTurnRegistry } from "./active-turn-registry.js";
 import type { AgentProxySettings } from "./agent-proxy.js";
 import {
 	CodexAppServer,
@@ -271,75 +272,37 @@ interface CodexQuestion {
 }
 
 /**
- * Build a JSON Schema from Codex's `requestUserInput` questions so the
- * unified `UserInputPanel` can render them as form fields. Mirrors the
- * shape the existing Rust bridge used to produce — moved into the
- * sidecar so Rust can stay generic about user-input semantics.
+ * Canonical answer key for a Codex question. MUST mirror the fallback
+ * chain Rust's `pipeline::user_question::normalize_question` uses to
+ * derive the canonical question text — the unified AUQ renderer keys its
+ * `answers` map by that text.
  */
-function buildCodexUserInputSchema(
-	questions: CodexQuestion[],
-): Record<string, unknown> {
-	const properties: Record<string, unknown> = {};
-	const required: string[] = [];
-
-	questions.forEach((q, i) => {
-		const key = q.id ?? `q${i}`;
-		required.push(key);
-		const header = q.header ?? "";
-		const questionText = q.question ?? "Question";
-		const title = header || questionText;
-		const description = header ? questionText : "";
-		const options = Array.isArray(q.options) ? q.options : [];
-		const hasOptions = options.length > 0;
-
-		const oneOf = hasOptions
-			? options.map((opt) => ({
-					const: opt.label ?? "",
-					title: opt.label ?? "",
-					description: opt.description ?? "",
-				}))
-			: [
-					{ const: "yes", title: "Yes" },
-					{ const: "no", title: "No" },
-				];
-
-		const prop: Record<string, unknown> = hasOptions
-			? {
-					type: "string",
-					title,
-					description,
-					oneOf,
-				}
-			: q.isOther
-				? { type: "string", title, description }
-				: { type: "string", title, description, oneOf };
-		if (q.isOther) {
-			prop["x-allow-other"] = true;
-		}
-		properties[key] = prop;
-	});
-
-	return { type: "object", properties, required };
+function codexQuestionKey(q: CodexQuestion, index: number): string {
+	return q.question || q.header || `Question ${index + 1}`;
 }
 
 /**
- * Reverse `buildCodexUserInputSchema`: take the unified form content
- * (`{ q0: "Option A", ... }`) and produce Codex's expected answer
- * shape (`{ q0: { answers: ["Option A"] }, ... }`).
+ * Map the unified AUQ response (`{ answers: { [questionText]: "label" } }`)
+ * back into Codex's expected shape (`{ id: { answers: ["label"] } }`),
+ * using the original question array we parked alongside the request.
  */
 function buildCodexAnswers(
+	questions: CodexQuestion[],
 	content: Record<string, unknown>,
 ): Record<string, { answers: string[] }> {
+	const byQuestion =
+		typeof content.answers === "object" &&
+		content.answers !== null &&
+		!Array.isArray(content.answers)
+			? (content.answers as Record<string, unknown>)
+			: {};
 	const answers: Record<string, { answers: string[] }> = {};
-	for (const [key, value] of Object.entries(content)) {
-		if (typeof value === "string") {
-			answers[key] = { answers: [value] };
-		} else if (Array.isArray(value)) {
-			answers[key] = {
-				answers: value.filter((v): v is string => typeof v === "string"),
-			};
-		}
-	}
+	questions.forEach((q, i) => {
+		const value = byQuestion[codexQuestionKey(q, i)];
+		if (typeof value !== "string" || !value) return;
+		const key = q.id ?? `q${i}`;
+		answers[key] = { answers: [value] };
+	});
 	return answers;
 }
 
@@ -445,10 +408,7 @@ export class CodexAppServerManager implements SessionManager {
 	private sessions = new Map<string, AppServerContext>();
 	private pendingApprovals = new Map<string, PendingApproval>();
 	private pendingUserInputs = new Map<string, PendingUserInput>();
-	// Sessions the user hit Stop on while the codex thread was still starting
-	// up (before `ensureContext` registers a context). `sendMessage` consumes
-	// the intent after startup and tears the turn down instead of running it.
-	private abortRequested = new Set<string>();
+	private readonly turns = new ActiveTurnRegistry();
 
 	/** Called by index.ts when frontend responds to a permission prompt. */
 	resolvePermission(permissionId: string, behavior: "allow" | "deny"): void {
@@ -511,9 +471,30 @@ export class CodexAppServerManager implements SessionManager {
 		} else {
 			const answers =
 				resolution.action === "submit"
-					? buildCodexAnswers(resolution.content)
+					? buildCodexAnswers(pending.questions, resolution.content)
 					: {};
 			ctx.server.sendResponse(pending.jsonRpcId, { answers });
+
+			// Mark the resolved Q&A in the live stream so Rust persists the
+			// transcript card at this position (see emitter doc).
+			if (
+				ctx.activeEmitter &&
+				ctx.activeRequestId &&
+				resolution.action !== "cancel"
+			) {
+				ctx.activeEmitter.userQuestionResolved(
+					ctx.activeRequestId,
+					userInputId,
+					"Codex",
+					pending.questions as unknown as Array<Record<string, unknown>>,
+					resolution.action === "submit"
+						? (resolution.content.answers as
+								| Record<string, unknown>
+								| undefined)
+						: undefined,
+					resolution.action,
+				);
+			}
 		}
 		logger.debug(`Codex user-input resolved`, {
 			userInputId,
@@ -543,10 +524,12 @@ export class CodexAppServerManager implements SessionManager {
 			additionalDirectories,
 			images,
 		} = params;
-		// Drop any stale abort intent from a prior stop that landed with no
-		// live context. A genuine mid-startup stop for THIS turn is recorded
-		// again during the awaits below and caught right after ensureContext.
-		this.abortRequested.delete(sessionId);
+		// Register the turn before any startup await (goal pre-flight +
+		// ensureContext) so a Stop pressed mid-startup emits `aborted`
+		// instantly and tears the turn down via `tearDownTurn`.
+		this.turns.begin(sessionId, requestId, emitter, () =>
+			this.tearDownTurn(sessionId),
+		);
 		const workDir = cwd ?? process.cwd();
 		const effectiveFastMode =
 			fastMode === true && modelSupportsFastMode("codex", model);
@@ -588,13 +571,12 @@ export class CodexAppServerManager implements SessionManager {
 			effectiveFastMode,
 			agentProxy,
 		);
-		// User hit Stop while the thread was still starting up. stopSession
-		// couldn't find a context to kill and only recorded the intent — honor
-		// it now: tear down and report the abort instead of running the turn.
-		if (this.abortRequested.delete(sessionId)) {
+		// Stop pressed during startup — `requestStop` already emitted `aborted`.
+		// Kill the freshly-started server and bail instead of running the turn.
+		if (this.turns.isAbortRequested(sessionId)) {
 			ctx.server.kill();
 			this.sessions.delete(sessionId);
-			emitter.aborted(requestId, "user_requested");
+			this.turns.end(sessionId, requestId);
 			return;
 		}
 		// Codex usage notifications do not include a model id.
@@ -641,8 +623,6 @@ export class CodexAppServerManager implements SessionManager {
 		);
 		turnStartParams.sandboxPolicy = sandboxPolicy;
 
-		let aborted = false;
-
 		// Stash the active stream's routing info so `steer()` can fire a
 		// synthetic user passthrough on the correct request id / emitter.
 		ctx.activeRequestId = requestId;
@@ -650,10 +630,7 @@ export class CodexAppServerManager implements SessionManager {
 
 		return new Promise<void>((resolve, reject) => {
 			ctx.turnResolve = resolve;
-			ctx.turnReject = (err) => {
-				aborted = true;
-				reject(err);
-			};
+			ctx.turnReject = reject;
 
 			const emit = (event: object) => {
 				emitter.passthrough(requestId, event);
@@ -880,7 +857,7 @@ export class CodexAppServerManager implements SessionManager {
 						: [];
 
 					// Park the entry alongside the question array so we can
-					// reverse-map the unified-form response back into Codex's
+					// reverse-map the unified AUQ response back into Codex's
 					// `{ id: { answers: [value] } }` shape.
 					this.pendingUserInputs.set(userInputId, {
 						kind: "codex-form",
@@ -889,12 +866,18 @@ export class CodexAppServerManager implements SessionManager {
 						questions,
 					});
 
+					// Raw Codex questions ride the unified ask-user-question
+					// payload — Rust normalizes them into the canonical shape
+					// (id/isOther/Yes-No fallback) before the frontend sees them.
 					emitter.userInputRequest(
 						requestId,
 						userInputId,
 						"Codex",
 						"Codex needs your input.",
-						{ kind: "form", schema: buildCodexUserInputSchema(questions) },
+						{
+							kind: "ask-user-question",
+							questions: questions as unknown as Array<Record<string, unknown>>,
+						},
 					);
 					logger.debug(`Codex user-input request`, { userInputId });
 					return;
@@ -1055,11 +1038,12 @@ export class CodexAppServerManager implements SessionManager {
 					reject(err);
 				});
 		}).finally(() => {
-			if (aborted) {
-				emitter.aborted(requestId, "user_requested");
-			} else {
+			// `aborted` is terminal — `requestStop` already emitted it. Only
+			// emit `end` on natural completion / error-resolve, then clear.
+			if (!this.turns.isAbortRequested(sessionId)) {
 				emitter.end(requestId);
 			}
+			this.turns.end(sessionId, requestId);
 			if (ctx.activeRequestId === requestId) {
 				ctx.activeRequestId = null;
 				ctx.activeEmitter = null;
@@ -1082,10 +1066,18 @@ export class CodexAppServerManager implements SessionManager {
 		const cwd = process.cwd();
 		const model = options?.model?.trim() || pickFastestCodexModel();
 		const fastMode = modelSupportsFastMode("codex", model);
+		logger.debug(
+			`[${requestId}] codex title generation using model ${model} (fastMode: ${fastMode})`,
+		);
 		const server = new CodexAppServer({
 			binaryPath: CODEX_BIN_PATH,
 			cwd,
 			agentProxy: options?.agentProxy,
+			// Title generation must never start the user's configured MCP
+			// servers: on a new worktree's first turn that races the real
+			// conversation's MCP init and can leave tools (e.g. Linear)
+			// unavailable. This is a throwaway one-shot, so disable MCP.
+			disableMcp: true,
 			onNotification: () => {},
 			onRequest: (req) => {
 				if (APPROVAL_METHODS.has(req.method)) {
@@ -1383,17 +1375,13 @@ export class CodexAppServerManager implements SessionManager {
 
 	// ── stopSession / shutdown ───────────────────────────────────────────
 
-	async stopSession(sessionId: string): Promise<void> {
+	/** Tear down the active turn: drop pending prompts, interrupt the upstream
+	 *  turn (best-effort, no await), kill the app-server, reject the turn
+	 *  promise. No-op if no context is registered yet (mid-startup) — the
+	 *  post-`ensureContext` abort check kills the freshly-started server. */
+	private tearDownTurn(sessionId: string): void {
 		const ctx = this.sessions.get(sessionId);
-		if (!ctx) {
-			// Mid-startup: `ensureContext` (process spawn + initialize +
-			// thread/start) hasn't registered a context yet, so there's
-			// nothing to kill. Record the intent — `sendMessage` honors it
-			// the moment startup lands instead of dropping the abort and
-			// running the turn to completion.
-			this.abortRequested.add(sessionId);
-			return;
-		}
+		if (!ctx) return;
 		logger.info(`stopSession ${sessionId}`, {
 			threadId: ctx.providerThreadId ?? "(none)",
 		});
@@ -1431,9 +1419,14 @@ export class CodexAppServerManager implements SessionManager {
 		ctx.server.kill();
 		this.sessions.delete(sessionId);
 
-		// Use AbortError so the index catch can distinguish user-stop from real errors
-		const abortErr = new DOMException("Session stopped by user", "AbortError");
-		pendingReject?.(abortErr);
+		// AbortError lets the index catch distinguish user-stop from real errors.
+		pendingReject?.(new DOMException("Session stopped by user", "AbortError"));
+	}
+
+	async stopSession(sessionId: string): Promise<void> {
+		// Emits `aborted` instantly + runs `tearDownTurn` — works at any point,
+		// including during the first turn's startup (spawn + thread/start).
+		this.turns.requestStop(sessionId);
 	}
 
 	/**
@@ -1545,12 +1538,12 @@ export class CodexAppServerManager implements SessionManager {
 	}
 
 	async shutdown(): Promise<void> {
-		for (const [_id, ctx] of this.sessions) {
+		for (const sessionId of [...this.sessions.keys()]) {
 			try {
-				ctx.turnReject?.(new Error("Sidecar shutdown"));
-				ctx.turnResolve = null;
-				ctx.turnReject = null;
-				ctx.server.kill();
+				// Abort any active turn (emits `aborted` + rejects), then make
+				// sure the server is dead even on idle sessions.
+				this.turns.requestStop(sessionId);
+				this.sessions.get(sessionId)?.server.kill();
 			} catch (err) {
 				logger.error("shutdown: kill failed", errorDetails(err));
 			}
@@ -1858,7 +1851,7 @@ function shouldEnrichCollabItem(params: unknown): boolean {
 	const item = (params as Record<string, unknown>).item as
 		| Record<string, unknown>
 		| undefined;
-	if (!item || item.type !== "collabAgentToolCall") return false;
+	if (item?.type !== "collabAgentToolCall") return false;
 	const receivers = item.receiverThreadIds;
 	return Array.isArray(receivers) && receivers.length > 0;
 }
@@ -2000,38 +1993,22 @@ function buildAgentProxyKey(agentProxy?: AgentProxySettings): string {
 }
 
 /**
- * Map Helmor's permissionMode to Codex's collaborationMode.
- * Returns undefined when no override is needed (i.e. default mode).
+ * Map Helmor's binary permissionMode to Codex's collaborationMode: `plan`
+ * (read-only) or full access. Always sent explicitly — Codex stays in plan mode
+ * across turns unless told otherwise.
  */
 function toCodexCollaborationMode(
 	permissionMode: string | undefined,
 	model: string | undefined,
 	effortLevel: string | undefined,
-): Record<string, unknown> | undefined {
-	if (permissionMode === "plan") {
-		return {
-			mode: "plan",
-			settings: {
-				...(model ? { model } : {}),
-				...(effortLevel ? { reasoning_effort: effortLevel } : {}),
-			},
-		};
-	}
-	// Explicitly switch to default mode — Codex stays in plan mode
-	// across turns unless told otherwise.
-	if (
-		permissionMode === "bypassPermissions" ||
-		permissionMode === "acceptEdits"
-	) {
-		return {
-			mode: "default",
-			settings: {
-				...(model ? { model } : {}),
-				...(effortLevel ? { reasoning_effort: effortLevel } : {}),
-			},
-		};
-	}
-	return undefined;
+): Record<string, unknown> {
+	return {
+		mode: permissionMode === "plan" ? "plan" : "default",
+		settings: {
+			...(model ? { model } : {}),
+			...(effortLevel ? { reasoning_effort: effortLevel } : {}),
+		},
+	};
 }
 
 // `bypassPermissions` uses `Granular` (not `"never"`) because Codex's
@@ -2061,10 +2038,10 @@ const BYPASS_GRANULAR_POLICY: CodexApprovalPolicy = {
 function toCodexApprovalPolicy(
 	permissionMode: string | undefined,
 ): CodexApprovalPolicy | undefined {
-	if (permissionMode === "bypassPermissions") return BYPASS_GRANULAR_POLICY;
-	if (permissionMode === "acceptEdits") return "untrusted";
-	// plan mode is read-only by design — leave to Codex default
-	return undefined;
+	// plan mode is read-only by design — leave to Codex default; everything else
+	// runs full access.
+	if (permissionMode === "plan") return undefined;
+	return BYPASS_GRANULAR_POLICY;
 }
 
 async function mergeAdditionalDirectories(

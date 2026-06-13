@@ -74,7 +74,15 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 		id: "session.reopenClosed",
 		title: "Reopen closed session",
 		group: "Session",
-		defaultHotkey: "Mod+Shift+T",
+		defaultHotkey: "Mod+Shift+R",
+		scopes: ["app"],
+		editable: true,
+	},
+	{
+		id: "window.close",
+		title: "Close window",
+		group: "System",
+		defaultHotkey: "Mod+Shift+W",
 		scopes: ["app"],
 		editable: true,
 	},
@@ -82,7 +90,9 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 		id: "workspace.copyPath",
 		title: "Copy workspace path",
 		group: "Workspace",
-		defaultHotkey: "Mod+Shift+C",
+		// Unbound by default — Mod+Shift+C is reserved for the composer
+		// context panel. Users can rebind from settings if they want.
+		defaultHotkey: null,
 		scopes: ["app"],
 		editable: true,
 	},
@@ -140,7 +150,9 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 		id: "action.createPr",
 		title: "Create PR",
 		group: "Actions",
-		defaultHotkey: "Mod+Shift+P",
+		// Unbound by default — Mod+Shift+P is reserved for composer plan mode.
+		// Users can rebind from settings if they want.
+		defaultHotkey: null,
 		scopes: ["app"],
 		editable: true,
 	},
@@ -202,10 +214,29 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 		editable: true,
 	},
 	{
+		// OS-level hotkey registered by the Rust backend. The default below
+		// MUST stay in sync with `default_hotkey` in src-tauri/src/global_hotkey.rs.
+		id: "quickPanel.hotkey",
+		title: "Quick panel hotkey",
+		description: "Open the quick task panel from anywhere.",
+		group: "System",
+		defaultHotkey: "Shift+Alt+Space",
+		scopes: ["app"],
+		editable: true,
+	},
+	{
 		id: "theme.toggle",
 		title: "Toggle theme (dark/light)",
 		group: "System",
 		defaultHotkey: "Mod+Alt+T",
+		scopes: ["app"],
+		editable: true,
+	},
+	{
+		id: "window.miniMode.toggle",
+		title: "Toggle mini mode",
+		group: "System",
+		defaultHotkey: "Mod+Control+M",
 		scopes: ["app"],
 		editable: true,
 	},
@@ -272,12 +303,19 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 		id: "composer.togglePlanMode",
 		title: "Toggle plan mode",
 		group: "Composer",
-		defaultHotkey: "Shift+Tab",
+		defaultHotkey: "Mod+Shift+P",
 		// workspace-composer only: plan mode is a per-session concept with
-		// no UI on the start surface. Bound to the narrower sibling scope so
-		// the start surface can reclaim Shift+Tab for cycling repositories
-		// without scope-overlap forcing both to disable each other.
+		// no UI on the start surface.
 		scopes: ["workspace-composer"],
+		editable: true,
+	},
+	{
+		id: "composer.toggleTerminalMode",
+		title: "Toggle terminal mode",
+		group: "Composer",
+		defaultHotkey: "Mod+Shift+T",
+		// App-scoped — handled in the global shortcut table, not composer-local.
+		scopes: ["app"],
 		editable: true,
 	},
 	{
@@ -286,8 +324,7 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 		group: "Start surface",
 		defaultHotkey: "Shift+Tab",
 		// start-composer only: cycles through repositories in the start
-		// composer. Sibling scope to workspace-composer, so the two
-		// Shift+Tab bindings don't scope-overlap and stay both enabled.
+		// composer.
 		scopes: ["start-composer"],
 		editable: true,
 	},
@@ -295,7 +332,7 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
 		id: "composer.toggleContextPanel",
 		title: "Toggle context panel",
 		group: "Composer",
-		defaultHotkey: "Mod+Alt+C",
+		defaultHotkey: "Mod+Shift+C",
 		scopes: ["app"],
 		editable: true,
 	},

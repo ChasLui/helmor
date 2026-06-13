@@ -1,10 +1,11 @@
 // Header strip for the workspace conversation pane: editor picker on the
-// left, export + inspector toggle on the right. Extracted out of App.tsx
+// left and inspector toggle on the right. Extracted out of App.tsx
 // to keep the shell render path focused on layout.
 import {
 	Check,
 	ChevronDown,
 	FolderOpen,
+	MoreHorizontal,
 	PanelRightClose,
 	PanelRightOpen,
 } from "lucide-react";
@@ -13,6 +14,9 @@ import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
+	DropdownMenuSub,
+	DropdownMenuSubContent,
+	DropdownMenuSubTrigger,
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -20,7 +24,6 @@ import {
 	TooltipContent,
 	TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { ExportSessionImageButton } from "@/features/panel/export-session-image";
 import { InlineShortcutDisplay } from "@/features/shortcuts/shortcut-display";
 import {
 	type DetectedEditor,
@@ -33,7 +36,6 @@ import { PREFERRED_EDITOR_STORAGE_KEY } from "@/shell/layout";
 
 type Props = {
 	workspaceId: string;
-	sessionId: string | null;
 	installedEditors: DetectedEditor[];
 	preferredEditor: DetectedEditor | null;
 	openPreferredEditorShortcut: string | null;
@@ -50,7 +52,6 @@ type Props = {
 
 export function WorkspaceHeaderActions({
 	workspaceId,
-	sessionId,
 	installedEditors,
 	preferredEditor,
 	openPreferredEditorShortcut,
@@ -62,10 +63,13 @@ export function WorkspaceHeaderActions({
 	onPickEditor,
 	pushWorkspaceToast,
 }: Props) {
+	const hasEditorActions =
+		!isChatMode && installedEditors.length > 0 && preferredEditor !== null;
+
 	return (
 		<div className="flex items-center gap-1">
-			{!isChatMode && installedEditors.length > 0 && preferredEditor ? (
-				<div className="flex -translate-x-1 items-center gap-0">
+			{hasEditorActions ? (
+				<div className="flex -translate-x-[9px] items-center gap-0 max-[960px]:-translate-x-[1px] max-[640px]:hidden">
 					<Tooltip>
 						<TooltipTrigger asChild>
 							<Button
@@ -152,7 +156,75 @@ export function WorkspaceHeaderActions({
 				</div>
 			) : null}
 			<div className="flex -translate-x-px items-center gap-1">
-				<ExportSessionImageButton sessionId={sessionId} />
+				{hasEditorActions ? (
+					<DropdownMenu>
+						<DropdownMenuTrigger asChild>
+							<Button
+								aria-label="More workspace actions"
+								variant="ghost"
+								size="icon-xs"
+								className="hidden text-muted-foreground hover:text-foreground max-[640px]:inline-flex"
+							>
+								<MoreHorizontal className="size-4" strokeWidth={1.8} />
+							</Button>
+						</DropdownMenuTrigger>
+						<DropdownMenuContent
+							side="bottom"
+							align="end"
+							sideOffset={4}
+							className="min-w-[11rem]"
+						>
+							<DropdownMenuSub>
+								<DropdownMenuSubTrigger>
+									<EditorIcon
+										editorId={preferredEditor.id}
+										className="shrink-0"
+									/>
+									<span className="flex-1">Open</span>
+								</DropdownMenuSubTrigger>
+								<DropdownMenuSubContent className="min-w-[11rem]">
+									<DropdownMenuItem
+										onClick={() => {
+											void openWorkspaceInFinder(workspaceId).catch((e) =>
+												pushWorkspaceToast(String(e), "Failed to open Finder"),
+											);
+										}}
+									>
+										<FolderOpen className="shrink-0" strokeWidth={1.8} />
+										<span className="flex-1">Finder</span>
+									</DropdownMenuItem>
+									{installedEditors.map((editor) => (
+										<DropdownMenuItem
+											key={editor.id}
+											onClick={() => {
+												onPickEditor(editor.id);
+												localStorage.setItem(
+													PREFERRED_EDITOR_STORAGE_KEY,
+													editor.id,
+												);
+												void openWorkspaceInEditor(
+													workspaceId,
+													editor.id,
+												).catch((e) =>
+													pushWorkspaceToast(
+														String(e),
+														`Failed to open ${editor.name}`,
+													),
+												);
+											}}
+										>
+											<EditorIcon editorId={editor.id} className="shrink-0" />
+											<span className="flex-1">{editor.name}</span>
+											{editor.id === preferredEditor.id && (
+												<Check className="ml-auto text-muted-foreground" />
+											)}
+										</DropdownMenuItem>
+									))}
+								</DropdownMenuSubContent>
+							</DropdownMenuSub>
+						</DropdownMenuContent>
+					</DropdownMenu>
+				) : null}
 				{/* Inspector toggle hidden in chat mode — the inspector pane
 				 *  itself is hidden, so the button has nothing to toggle. */}
 				{!isChatMode ? (
@@ -167,7 +239,7 @@ export function WorkspaceHeaderActions({
 								onClick={onToggleInspector}
 								variant="ghost"
 								size="icon-xs"
-								className="text-muted-foreground hover:text-foreground"
+								className="text-muted-foreground hover:text-foreground max-[960px]:hidden"
 							>
 								{inspectorCollapsed ? (
 									<PanelRightOpen className="size-4" strokeWidth={1.8} />

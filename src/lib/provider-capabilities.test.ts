@@ -15,7 +15,6 @@ const claudeCaps: ProviderCapabilities = {
 	supportsSteer: true,
 	supportsSlashCommands: true,
 	requiresApiKey: false,
-	permissionModes: ["default", "acceptEdits", "plan", "bypassPermissions"],
 };
 
 const codexCaps: ProviderCapabilities = {
@@ -27,19 +26,17 @@ const codexCaps: ProviderCapabilities = {
 	supportsSteer: true,
 	supportsSlashCommands: true,
 	requiresApiKey: false,
-	permissionModes: ["default", "bypassPermissions"],
 };
 
 const cursorCaps: ProviderCapabilities = {
 	provider: "cursor",
 	displayName: "Cursor",
-	supportsPlanMode: false,
+	supportsPlanMode: true,
 	supportsActiveGoal: false,
 	supportsContextUsage: false,
 	supportsSteer: false,
 	supportsSlashCommands: true,
 	requiresApiKey: true,
-	permissionModes: ["default"],
 };
 
 const table: ProviderCapabilities[] = [claudeCaps, codexCaps, cursorCaps];
@@ -106,11 +103,13 @@ describe("findProviderCapabilities", () => {
 // local default table to the Rust source-of-truth values so that window
 // never reopens.
 describe("DEFAULT_PROVIDER_CAPABILITIES (cold-start initialData)", () => {
-	it("covers exactly the three shipping providers", () => {
+	it("covers exactly the shipping providers", () => {
 		expect(DEFAULT_PROVIDER_CAPABILITIES.map((caps) => caps.provider)).toEqual([
 			"claude",
 			"codex",
 			"cursor",
+			"opencode",
+			"mimo",
 		]);
 	});
 
@@ -135,13 +134,30 @@ describe("DEFAULT_PROVIDER_CAPABILITIES (cold-start initialData)", () => {
 			"codex",
 		);
 		expect(codex?.displayName).toBe("Codex");
-		expect(codex?.permissionModes).toEqual(["default", "bypassPermissions"]);
 		const cursor = findProviderCapabilities(
 			DEFAULT_PROVIDER_CAPABILITIES,
 			"cursor",
 		);
 		expect(cursor?.displayName).toBe("Cursor");
 		expect(cursor?.requiresApiKey).toBe(true);
+		// OpenCode must resolve to itself, not fall back to "Claude".
+		const opencode = findProviderCapabilities(
+			DEFAULT_PROVIDER_CAPABILITIES,
+			"opencode",
+		);
+		expect(opencode?.displayName).toBe("OpenCode");
+		expect(opencode?.supportsContextUsage).toBe(true);
+		expect(opencode?.supportsActiveGoal).toBe(false);
+		expect(opencode?.requiresApiKey).toBe(false);
+		// MiMo Code (opencode-protocol fork) mirrors OpenCode's capability row.
+		const mimo = findProviderCapabilities(
+			DEFAULT_PROVIDER_CAPABILITIES,
+			"mimo",
+		);
+		expect(mimo?.displayName).toBe("MiMo Code");
+		expect(mimo?.supportsContextUsage).toBe(true);
+		expect(mimo?.supportsActiveGoal).toBe(false);
+		expect(mimo?.requiresApiKey).toBe(false);
 	});
 
 	it("is wired as the query's initialData so the cold-start window is closed", () => {

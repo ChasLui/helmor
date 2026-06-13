@@ -1,5 +1,4 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import {
 	getMaterialFileIcon,
 	getMaterialFolderIcon,
@@ -19,7 +18,15 @@ import {
 	PlusIcon,
 	Undo2Icon,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+	memo,
+	useCallback,
+	useDeferredValue,
+	useEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import { toast } from "sonner";
 import { AnimatedShinyText } from "@/components/ui/animated-shiny-text";
 import { Badge } from "@/components/ui/badge";
@@ -31,13 +38,7 @@ import {
 	ContextMenuSeparator,
 	ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import { NumberTicker } from "@/components/ui/number-ticker";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import {
-	Tooltip,
-	TooltipContent,
-	TooltipTrigger,
-} from "@/components/ui/tooltip";
 import type {
 	CommitButtonState,
 	WorkspaceCommitButtonMode,
@@ -57,6 +58,7 @@ import {
 	type InspectorFileItem,
 	isActiveEditorTarget,
 } from "@/lib/editor-session";
+import { openUrl } from "@/lib/platform-bridge";
 import {
 	helmorQueryKeys,
 	workspaceForgeActionStatusQueryOptions,
@@ -75,6 +77,39 @@ const STATUS_COLORS: Record<InspectorFileItem["status"], string> = {
 	D: "text-red-500",
 };
 
+const fileIconCache = new Map<string, string>();
+const folderIconCache = new Map<string, string>();
+const DIFF_ROW_RENDER_STYLE = {
+	contentVisibility: "auto",
+	containIntrinsicSize: "auto 20px",
+} as const;
+const CHANGES_TREE_ROW_TEXT_CLASS =
+	"font-sans text-ui font-normal leading-none";
+const CHANGES_TREE_ICON_CLASS = "size-4 shrink-0 self-center";
+const CHANGES_ROW_STATE_CLASS =
+	"text-muted-foreground transition-colors hover:bg-accent/45";
+const CHANGES_ROW_SELECTED_CLASS = "bg-accent/70 text-foreground";
+const CHANGES_ROW_MUTED_SELECTED_CLASS = "bg-muted/50 text-foreground";
+const CHANGES_ROW_ICON_STATE_CLASS =
+	"text-muted-foreground hover:bg-accent/45 hover:text-foreground";
+
+function getCachedFileIcon(name: string): string {
+	const cached = fileIconCache.get(name);
+	if (cached) return cached;
+	const icon = getMaterialFileIcon(name);
+	fileIconCache.set(name, icon);
+	return icon;
+}
+
+function getCachedFolderIcon(name: string, open: boolean): string {
+	const key = `${name}\0${open ? "1" : "0"}`;
+	const cached = folderIconCache.get(key);
+	if (cached) return cached;
+	const icon = getMaterialFolderIcon(name, open || undefined);
+	folderIconCache.set(key, icon);
+	return icon;
+}
+
 /** A change item already projected into a single area's line counts.
  * `insertions`/`deletions` are derived from the corresponding area
  * (staged / unstaged / committed) — never used elsewhere. */
@@ -90,6 +125,7 @@ type ChangesSectionProps = {
 	workspaceRemoteUrl: string | null;
 	workspaceTargetBranch: string | null;
 	changes: InspectorFileItem[];
+	changesLoaded: boolean;
 	editorMode: boolean;
 	activeEditor?: ActiveEditorTarget | null;
 	preferredEditor?: DetectedEditor | null;
@@ -114,6 +150,7 @@ function ChangesSectionImpl({
 	workspaceRemoteUrl,
 	workspaceTargetBranch,
 	changes,
+	changesLoaded,
 	editorMode,
 	activeEditor,
 	preferredEditor = null,
@@ -183,13 +220,25 @@ function ChangesSectionImpl({
 		return () => window.clearTimeout(id);
 	}, [branchSwitching, changes]);
 
+	// Deferred copy of the changes array. On a cold workspace switch a large
+	// new `changes` array arrives in the same urgent render as the ChatThread
+	// mount; deriving the area projections (and the heavy buildTree/sort inside
+	// the tree renderers) from this deferred value lets React paint the rest of
+	// the inspector first, then reconcile the change list at lower priority.
+	// During the transition `useDeferredValue` re-renders with the PREVIOUS
+	// (complete, valid) array, so every settled frame is byte-identical to what
+	// today shows — only the timing shifts (converges in ~1 frame). The
+	// branch-switch effects below intentionally keep reading the immediate
+	// `changes` prop so the target-branch loading state still flips promptly.
+	const deferredChanges = useDeferredValue(changes);
+
 	// Each area has its own insertions/deletions. Project the area's stats
 	// onto a flat `insertions`/`deletions` pair so downstream components
 	// (LineStats etc.) read the correct numbers without knowing which group
 	// they're in.
 	const stagedChanges = useMemo<ChangeRow[]>(
 		() =>
-			changes
+			deferredChanges
 				.filter((change) => change.stagedStatus != null)
 				.map((change) => ({
 					...change,
@@ -197,11 +246,11 @@ function ChangesSectionImpl({
 					insertions: change.stagedInsertions,
 					deletions: change.stagedDeletions,
 				})),
-		[changes],
+		[deferredChanges],
 	);
 	const unstagedChanges = useMemo<ChangeRow[]>(
 		() =>
-			changes
+			deferredChanges
 				.filter((change) => change.unstagedStatus != null)
 				.map((change) => ({
 					...change,
@@ -209,11 +258,11 @@ function ChangesSectionImpl({
 					insertions: change.unstagedInsertions,
 					deletions: change.unstagedDeletions,
 				})),
-		[changes],
+		[deferredChanges],
 	);
 	const committedChanges = useMemo<ChangeRow[]>(
 		() =>
-			changes
+			deferredChanges
 				.filter((change) => change.committedStatus != null)
 				.map((change) => ({
 					...change,
@@ -221,7 +270,7 @@ function ChangesSectionImpl({
 					insertions: change.committedInsertions,
 					deletions: change.committedDeletions,
 				})),
-		[changes],
+		[deferredChanges],
 	);
 	const hasUncommittedChanges =
 		stagedChanges.length > 0 || unstagedChanges.length > 0;
@@ -303,7 +352,7 @@ function ChangesSectionImpl({
 
 			<ScrollArea
 				aria-label="Changes panel body"
-				className="min-h-0 flex-1 bg-muted/20 font-mono text-mini"
+				className="min-h-0 flex-1 bg-muted/20 font-sans text-ui leading-5"
 			>
 				{hasUncommittedChanges && (
 					<>
@@ -335,7 +384,7 @@ function ChangesSectionImpl({
 								label="Changes"
 								icon={
 									<LaptopIcon
-										className="size-3 shrink-0 text-muted-foreground"
+										className="size-3 shrink-0 text-muted-foreground/70"
 										strokeWidth={2}
 									/>
 								}
@@ -382,8 +431,8 @@ function ChangesSectionImpl({
 					/>
 				)}
 
-				{!hasChanges && (
-					<div className="px-3 py-3 text-mini leading-5 text-muted-foreground">
+				{changesLoaded && !hasChanges && !branchSwitching && (
+					<div className="px-3 py-3 text-small leading-5 text-muted-foreground/70">
 						No changes on this branch yet.
 					</div>
 				)}
@@ -468,7 +517,7 @@ function ChangesGroup({
 		: null;
 	return (
 		<div>
-			<div className="group/header flex w-full items-center gap-1 py-1 pl-1 pr-2 text-mini font-semibold tracking-[-0.01em] text-muted-foreground">
+			<div className="group/header flex w-full items-center gap-1 py-1 pl-1 pr-2 text-ui font-medium text-muted-foreground/70">
 				<Button
 					type="button"
 					variant="ghost"
@@ -603,7 +652,7 @@ function BranchDiffSection({
 
 	return (
 		<div>
-			<div className="group/header flex w-full items-center gap-1 py-1 pl-1 pr-2 text-mini font-semibold tracking-[-0.01em] text-muted-foreground">
+			<div className="group/header flex w-full items-center gap-1 py-1 pl-1 pr-2 text-ui font-medium text-muted-foreground/70">
 				<Button
 					type="button"
 					variant="ghost"
@@ -621,7 +670,7 @@ function BranchDiffSection({
 						strokeWidth={2}
 					/>
 					<CloudIcon
-						className="size-3 shrink-0 text-muted-foreground"
+						className="size-3 shrink-0 text-muted-foreground/70"
 						strokeWidth={2}
 					/>
 					<span className="truncate">Remote</span>
@@ -646,7 +695,7 @@ function BranchDiffSection({
 					)}
 				>
 					{loading && changes.length === 0 ? (
-						<div className="px-2 py-2 text-micro text-muted-foreground">
+						<div className="px-2 py-2 text-micro text-muted-foreground/70">
 							Switching target branch…
 						</div>
 					) : treeView ? (
@@ -691,16 +740,20 @@ function buildTree(changes: ChangeRow[]) {
 	for (const change of changes) {
 		const parts = change.path.split("/");
 		let current = root;
+		let currentPath = "";
 		for (let index = 0; index < parts.length - 1; index += 1) {
 			const part = parts[index];
-			if (!current.children.has(part)) {
-				current.children.set(part, {
+			currentPath = currentPath ? `${currentPath}/${part}` : part;
+			let child = current.children.get(part);
+			if (!child) {
+				child = {
 					name: part,
-					path: parts.slice(0, index + 1).join("/"),
+					path: currentPath,
 					children: new Map(),
-				});
+				};
+				current.children.set(part, child);
 			}
-			current = current.children.get(part)!;
+			current = child;
 		}
 		current.children.set(change.name, {
 			name: change.name,
@@ -738,12 +791,12 @@ function ChangesTreeView({
 	workspaceBranch: string | null;
 	workspaceRemoteUrl: string | null;
 }) {
-	const tree = buildTree(changes);
+	const tree = useMemo(() => buildTree(changes), [changes]);
 	const [expanded, setExpanded] = useState<Set<string>>(
 		() => new Set(collectFolderPaths(tree)),
 	);
 
-	const toggle = (path: string) => {
+	const toggle = useCallback((path: string) => {
 		setExpanded((previous) => {
 			const next = new Set(previous);
 			if (next.has(path)) {
@@ -753,27 +806,33 @@ function ChangesTreeView({
 			}
 			return next;
 		});
-	};
+	}, []);
 
 	return (
-		<div className="py-0.5">
-			<TreeNodeList
-				nodes={tree.children}
-				expanded={expanded}
-				onToggle={toggle}
-				depth={0}
-				editorMode={editorMode}
-				activeEditorPath={activeEditorPath}
-				onOpenEditorFile={onOpenEditorFile}
-				onOpenExternalEditor={onOpenExternalEditor}
-				flashingPaths={flashingPaths}
-				action={action}
-				onStageAction={onStageAction}
-				onDiscard={onDiscard}
-				workspaceBranch={workspaceBranch}
-				workspaceRemoteUrl={workspaceRemoteUrl}
-			/>
-		</div>
+		<ChangesRowsContextMenu
+			changes={changes}
+			workspaceBranch={workspaceBranch}
+			workspaceRemoteUrl={workspaceRemoteUrl}
+		>
+			<div className="py-0.5">
+				<TreeNodeList
+					nodes={tree.children}
+					expanded={expanded}
+					onToggle={toggle}
+					depth={0}
+					editorMode={editorMode}
+					activeEditorPath={activeEditorPath}
+					onOpenEditorFile={onOpenEditorFile}
+					onOpenExternalEditor={onOpenExternalEditor}
+					flashingPaths={flashingPaths}
+					action={action}
+					onStageAction={onStageAction}
+					onDiscard={onDiscard}
+					workspaceBranch={workspaceBranch}
+					workspaceRemoteUrl={workspaceRemoteUrl}
+				/>
+			</div>
+		</ChangesRowsContextMenu>
 	);
 }
 
@@ -819,14 +878,18 @@ function TreeNodeList({
 	workspaceBranch: string | null;
 	workspaceRemoteUrl: string | null;
 }) {
-	const sorted = [...nodes.values()].sort((left, right) => {
-		const leftIsFolder = left.children.size > 0 && !left.file;
-		const rightIsFolder = right.children.size > 0 && !right.file;
-		if (leftIsFolder !== rightIsFolder) {
-			return leftIsFolder ? -1 : 1;
-		}
-		return left.name.localeCompare(right.name);
-	});
+	const sorted = useMemo(
+		() =>
+			[...nodes.values()].sort((left, right) => {
+				const leftIsFolder = left.children.size > 0 && !left.file;
+				const rightIsFolder = right.children.size > 0 && !right.file;
+				if (leftIsFolder !== rightIsFolder) {
+					return leftIsFolder ? -1 : 1;
+				}
+				return left.name.localeCompare(right.name);
+			}),
+		[nodes],
+	);
 
 	return (
 		<>
@@ -838,8 +901,13 @@ function TreeNodeList({
 					return (
 						<div key={node.path}>
 							<div
-								className="flex cursor-interactive items-center gap-1 py-[1.5px] pr-2 text-muted-foreground transition-colors hover:bg-accent/60"
+								className={cn(
+									"flex h-5 min-h-5 cursor-interactive items-center gap-1 pr-2",
+									CHANGES_TREE_ROW_TEXT_CLASS,
+									CHANGES_ROW_STATE_CLASS,
+								)}
 								style={{
+									...DIFF_ROW_RENDER_STYLE,
 									paddingLeft: `${depth * 12 + 8}px`,
 								}}
 								onClick={() => onToggle(node.path)}
@@ -854,17 +922,17 @@ function TreeNodeList({
 							>
 								<ChevronRightIcon
 									className={cn(
-										"size-3 shrink-0 transition-transform",
+										"size-3 shrink-0 self-center transition-transform",
 										isOpen && "rotate-90",
 									)}
 									strokeWidth={1.8}
 								/>
 								<img
-									src={getMaterialFolderIcon(node.name, isOpen || undefined)}
+									src={getCachedFolderIcon(node.name, isOpen)}
 									alt=""
-									className="size-4 shrink-0"
+									className={CHANGES_TREE_ICON_CLASS}
 								/>
-								<span className="truncate">{node.name}</span>
+								<span className="min-w-0 truncate">{node.name}</span>
 							</div>
 							{isOpen && (
 								<TreeNodeList
@@ -892,18 +960,23 @@ function TreeNodeList({
 				const selected = file?.absolutePath === activeEditorPath;
 				const isFlashing = !!file && flashingPaths.has(file.path);
 
-				const row = (
+				return (
 					<div
+						key={node.path}
 						className={cn(
-							"group/row flex cursor-interactive items-center gap-1 py-[1.5px] pr-2 text-muted-foreground transition-colors hover:bg-accent/60",
+							"group/row flex h-5 min-h-5 cursor-interactive items-center gap-1 pr-2",
+							CHANGES_TREE_ROW_TEXT_CLASS,
+							CHANGES_ROW_STATE_CLASS,
 							selected &&
 								(editorMode
-									? "bg-accent text-foreground"
-									: "bg-muted/60 text-foreground"),
+									? CHANGES_ROW_SELECTED_CLASS
+									: CHANGES_ROW_MUTED_SELECTED_CLASS),
 						)}
 						style={{
+							...DIFF_ROW_RENDER_STYLE,
 							paddingLeft: `${depth * 12 + 22}px`,
 						}}
+						data-change-path={file?.path}
 						role="treeitem"
 						tabIndex={0}
 						onClick={() =>
@@ -922,9 +995,9 @@ function TreeNodeList({
 						}}
 					>
 						<img
-							src={getMaterialFileIcon(node.name)}
+							src={getCachedFileIcon(node.name)}
 							alt=""
-							className="size-4 shrink-0"
+							className={CHANGES_TREE_ICON_CLASS}
 						/>
 						<ShinyFlash active={isFlashing}>{node.name}</ShinyFlash>
 						{file && (
@@ -935,22 +1008,6 @@ function TreeNodeList({
 								onStageAction={onStageAction}
 								onDiscard={onDiscard}
 							/>
-						)}
-					</div>
-				);
-
-				return (
-					<div key={node.path}>
-						{file ? (
-							<FileRowContextMenu
-								file={file}
-								workspaceBranch={workspaceBranch}
-								workspaceRemoteUrl={workspaceRemoteUrl}
-							>
-								{row}
-							</FileRowContextMenu>
-						) : (
-							row
 						)}
 					</div>
 				);
@@ -988,26 +1045,31 @@ function ChangesFlatView({
 	const hasDiscard = !!onDiscard;
 
 	return (
-		<div className="py-0.5">
-			{changes.map((change) => {
-				const canOpenExternalEditor = change.status !== "D";
-				const hasHoverAction = canOpenExternalEditor || hasStage || hasDiscard;
+		<ChangesRowsContextMenu
+			changes={changes}
+			workspaceBranch={workspaceBranch}
+			workspaceRemoteUrl={workspaceRemoteUrl}
+		>
+			<div className="py-0.5">
+				{changes.map((change) => {
+					const canOpenExternalEditor = change.status !== "D";
+					const hasHoverAction =
+						canOpenExternalEditor || hasStage || hasDiscard;
 
-				return (
-					<FileRowContextMenu
-						key={change.path}
-						file={change}
-						workspaceBranch={workspaceBranch}
-						workspaceRemoteUrl={workspaceRemoteUrl}
-					>
+					return (
 						<div
+							key={change.path}
 							className={cn(
-								"group/row flex cursor-interactive items-center gap-1.5 py-[1.5px] pl-2 pr-2 text-muted-foreground transition-colors hover:bg-accent/60",
+								"group/row flex h-5 min-h-5 cursor-interactive items-center gap-1.5 pl-2 pr-2",
+								CHANGES_TREE_ROW_TEXT_CLASS,
+								CHANGES_ROW_STATE_CLASS,
 								change.absolutePath === activeEditorPath &&
 									(editorMode
-										? "bg-accent text-foreground"
-										: "bg-muted/60 text-foreground"),
+										? CHANGES_ROW_SELECTED_CLASS
+										: CHANGES_ROW_MUTED_SELECTED_CLASS),
 							)}
+							style={DIFF_ROW_RENDER_STYLE}
+							data-change-path={change.path}
 							role="button"
 							tabIndex={0}
 							onClick={() =>
@@ -1025,9 +1087,9 @@ function ChangesFlatView({
 							}}
 						>
 							<img
-								src={getMaterialFileIcon(change.name)}
+								src={getCachedFileIcon(change.name)}
 								alt=""
-								className="size-4 shrink-0"
+								className={CHANGES_TREE_ICON_CLASS}
 							/>
 							<span className="min-w-0 max-w-[60%] truncate">
 								<ShinyFlash active={flashingPaths.has(change.path)}>
@@ -1036,7 +1098,7 @@ function ChangesFlatView({
 							</span>
 							<span
 								className={cn(
-									"min-w-0 flex-1 truncate text-right text-micro text-muted-foreground",
+									"min-w-0 flex-1 truncate text-right text-micro text-muted-foreground/70",
 									hasHoverAction && "group-hover/row:hidden",
 								)}
 							>
@@ -1075,10 +1137,10 @@ function ChangesFlatView({
 								/>
 							)}
 						</div>
-					</FileRowContextMenu>
-				);
-			})}
-		</div>
+					);
+				})}
+			</div>
+		</ChangesRowsContextMenu>
 	);
 }
 
@@ -1153,24 +1215,21 @@ function RowHoverActions({
 	return (
 		<span className="ml-auto hidden items-center gap-0.5 group-hover/row:inline-flex">
 			{canOpenExternalEditor && (
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<RowIconButton
-							aria-label="Open in editor"
-							onClick={() => onOpenExternalEditor(absolutePath)}
-							className="text-muted-foreground hover:bg-accent/60 hover:text-foreground"
-						>
-							<ExternalLinkIcon className="size-3.5" strokeWidth={2} />
-						</RowIconButton>
-					</TooltipTrigger>
-					<TooltipContent side="top">Open in editor</TooltipContent>
-				</Tooltip>
+				<RowIconButton
+					aria-label="Open in editor"
+					title="Open in editor"
+					onClick={() => onOpenExternalEditor(absolutePath)}
+					className={CHANGES_ROW_ICON_STATE_CLASS}
+				>
+					<ExternalLinkIcon className="size-3.5" strokeWidth={2} />
+				</RowIconButton>
 			)}
 			{onDiscard && (
 				<RowIconButton
 					aria-label="Discard file changes"
+					title="Discard file changes"
 					onClick={() => onDiscard(path)}
-					className="text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+					className={CHANGES_ROW_ICON_STATE_CLASS}
 				>
 					<Undo2Icon className="size-3.5" strokeWidth={2} />
 				</RowIconButton>
@@ -1178,8 +1237,9 @@ function RowHoverActions({
 			{action && onStageAction && (
 				<RowIconButton
 					aria-label={action === "stage" ? "Stage file" : "Unstage file"}
+					title={action === "stage" ? "Stage file" : "Unstage file"}
 					onClick={() => onStageAction(path)}
-					className="text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+					className={CHANGES_ROW_ICON_STATE_CLASS}
 				>
 					{action === "stage" ? (
 						<PlusIcon className="size-3.5" strokeWidth={2} />
@@ -1198,12 +1258,14 @@ function RowIconButton({
 	children,
 	className,
 	"aria-label": ariaLabel,
+	title,
 }: {
 	onClick: () => void;
 	disabled?: boolean;
 	children: React.ReactNode;
 	className?: string;
 	"aria-label": string;
+	title?: string;
 }) {
 	return (
 		<Button
@@ -1211,6 +1273,7 @@ function RowIconButton({
 			variant="ghost"
 			size="icon-xs"
 			aria-label={ariaLabel}
+			title={title}
 			disabled={disabled}
 			onClick={(event) => {
 				event.stopPropagation();
@@ -1258,16 +1321,63 @@ async function copyToClipboard(value: string, label: string) {
 	}
 }
 
-function FileRowContextMenu({
-	file,
+function ChangesRowsContextMenu({
+	changes,
 	workspaceBranch,
 	workspaceRemoteUrl,
 	children,
 }: {
-	file: ChangeRow;
+	changes: ChangeRow[];
 	workspaceBranch: string | null;
 	workspaceRemoteUrl: string | null;
 	children: React.ReactNode;
+}) {
+	const [activeFile, setActiveFile] = useState<ChangeRow | null>(null);
+	const filesByPath = useMemo(
+		() => new Map(changes.map((change) => [change.path, change])),
+		[changes],
+	);
+	const handleContextMenu = useCallback(
+		(event: React.MouseEvent<HTMLElement>) => {
+			const target = event.target;
+			const row =
+				target instanceof Element
+					? target.closest<HTMLElement>("[data-change-path]")
+					: null;
+			const path = row?.dataset.changePath;
+			const file = path ? (filesByPath.get(path) ?? null) : null;
+			setActiveFile(file);
+			if (!file) {
+				event.preventDefault();
+			}
+		},
+		[filesByPath],
+	);
+
+	return (
+		<ContextMenu onOpenChange={(open) => !open && setActiveFile(null)}>
+			<ContextMenuTrigger asChild>
+				<div onContextMenu={handleContextMenu}>{children}</div>
+			</ContextMenuTrigger>
+			{activeFile && (
+				<FileRowContextMenuContent
+					file={activeFile}
+					workspaceBranch={workspaceBranch}
+					workspaceRemoteUrl={workspaceRemoteUrl}
+				/>
+			)}
+		</ContextMenu>
+	);
+}
+
+function FileRowContextMenuContent({
+	file,
+	workspaceBranch,
+	workspaceRemoteUrl,
+}: {
+	file: ChangeRow;
+	workspaceBranch: string | null;
+	workspaceRemoteUrl: string | null;
 }) {
 	const remoteFileUrl = useMemo(
 		() => buildRemoteFileUrl(workspaceRemoteUrl, workspaceBranch, file.path),
@@ -1298,31 +1408,25 @@ function FileRowContextMenu({
 	}, [remoteFileUrl]);
 
 	return (
-		<ContextMenu>
-			<ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-			<ContextMenuContent className="min-w-52">
-				<ContextMenuItem onClick={() => void handleReveal()}>
-					<FolderOpenIcon />
-					<span>Reveal in Finder</span>
-				</ContextMenuItem>
-				<ContextMenuSeparator />
-				<ContextMenuItem onClick={handleCopyAbsolute}>
-					<CopyIcon />
-					<span>Copy Path</span>
-				</ContextMenuItem>
-				<ContextMenuItem onClick={handleCopyRelative}>
-					<CopyIcon />
-					<span>Copy Relative Path</span>
-				</ContextMenuItem>
-				<ContextMenuItem
-					onClick={handleCopyRemoteUrl}
-					disabled={!remoteFileUrl}
-				>
-					<LinkIcon />
-					<span>Copy Remote File URL</span>
-				</ContextMenuItem>
-			</ContextMenuContent>
-		</ContextMenu>
+		<ContextMenuContent className="min-w-52">
+			<ContextMenuItem onClick={() => void handleReveal()}>
+				<FolderOpenIcon />
+				<span>Reveal in Finder</span>
+			</ContextMenuItem>
+			<ContextMenuSeparator />
+			<ContextMenuItem onClick={handleCopyAbsolute}>
+				<CopyIcon />
+				<span>Copy Path</span>
+			</ContextMenuItem>
+			<ContextMenuItem onClick={handleCopyRelative}>
+				<CopyIcon />
+				<span>Copy Relative Path</span>
+			</ContextMenuItem>
+			<ContextMenuItem onClick={handleCopyRemoteUrl} disabled={!remoteFileUrl}>
+				<LinkIcon />
+				<span>Copy Remote File URL</span>
+			</ContextMenuItem>
+		</ContextMenuContent>
 	);
 }
 
@@ -1339,26 +1443,8 @@ function LineStats({
 
 	return (
 		<span className="flex shrink-0 items-center gap-1 text-micro tabular-nums">
-			{insertions > 0 && (
-				<span className="text-chart-2">
-					+
-					<NumberTicker
-						value={insertions}
-						animateOnMount={false}
-						className="text-chart-2"
-					/>
-				</span>
-			)}
-			{deletions > 0 && (
-				<span className="text-destructive">
-					−
-					<NumberTicker
-						value={deletions}
-						animateOnMount={false}
-						className="text-destructive"
-					/>
-				</span>
-			)}
+			{insertions > 0 && <span className="text-chart-2">+{insertions}</span>}
+			{deletions > 0 && <span className="text-destructive">−{deletions}</span>}
 		</span>
 	);
 }
@@ -1384,14 +1470,22 @@ function ShinyFlash({
 	}, [active]);
 
 	if (!shimmer) {
-		return <span className="truncate">{children}</span>;
+		return (
+			<span className={cn("min-w-0 truncate", CHANGES_TREE_ROW_TEXT_CLASS)}>
+				{children}
+			</span>
+		);
 	}
 
 	return (
 		<AnimatedShinyText
 			key={counterRef.current}
 			shimmerWidth={60}
-			className="!mx-0 !max-w-none truncate !text-neutral-500/80 ![animation-duration:1s] ![animation-iteration-count:3] ![animation-name:shiny-text-continuous] ![animation-timing-function:ease-in-out] dark:!text-neutral-500/80 dark:via-white via-black"
+			className={cn(
+				"!mx-0 !max-w-none truncate !text-neutral-500/80 ![animation-duration:1s] ![animation-iteration-count:3] ![animation-name:shiny-text-continuous] ![animation-timing-function:ease-in-out] dark:!text-neutral-500/80 dark:via-white via-black",
+				"min-w-0",
+				CHANGES_TREE_ROW_TEXT_CLASS,
+			)}
 		>
 			{children}
 		</AnimatedShinyText>

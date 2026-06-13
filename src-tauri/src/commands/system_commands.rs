@@ -7,7 +7,8 @@ use anyhow::Context;
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{
-    LogicalSize, LogicalUnit, Manager, PixelUnit, Size, State, Window, WindowSizeConstraints,
+    LogicalSize, LogicalUnit, Manager, PhysicalPosition, PhysicalSize, PixelUnit, Position, Size,
+    State, Window, WindowSizeConstraints,
 };
 
 use crate::workspace::scripts::{ScriptContext, ScriptEvent, ScriptProcessManager};
@@ -19,6 +20,8 @@ use super::common::{run_blocking, CmdResult};
 // Resizing is restored when onboarding exits.
 const ONBOARDING_WINDOW_WIDTH: f64 = 1300.0;
 const ONBOARDING_WINDOW_HEIGHT: f64 = 810.0;
+const MINI_WINDOW_WIDTH: f64 = 430.0;
+const MINI_WINDOW_HEIGHT: f64 = 760.0;
 const HELMOR_SKILL_NAME: &str = "helmor-cli";
 const HELMOR_SKILL_SOURCE: &str = "dohooo/helmor/.agents/skills/helmor-cli";
 
@@ -46,6 +49,14 @@ const ONBOARDING_COMPLETED_KEY: &str = "app.onboarding_completed";
 
 static ONBOARDING_WINDOW_STATE: LazyLock<Mutex<HashMap<String, bool>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static MINI_WINDOW_STATE: LazyLock<Mutex<HashMap<String, MiniWindowRestoreState>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Debug, Clone, Copy)]
+struct MiniWindowRestoreState {
+    size: PhysicalSize<u32>,
+    resizable: bool,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -69,10 +80,22 @@ pub struct AgentLoginStatus {
     pub claude: bool,
     pub codex: bool,
     pub cursor: bool,
+    pub opencode: bool,
+    pub mimo: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codex_auth_method: Option<String>,
+}
+
+// `None` when the binary couldn't be resolved or `--version` failed. Cursor is SDK-only.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentVersions {
+    pub claude: Option<String>,
+    pub codex: Option<String>,
+    pub opencode: Option<String>,
+    pub mimo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -119,17 +142,20 @@ pub struct ComponentsUpdateCheck {
     pub skills_error: Option<String>,
 }
 
-/// Where Helmor installs its managed CLI entrypoint on macOS.
+/// Where Helmor installs its managed CLI entrypoint. The OS-specific target
+/// path lives behind the `platform::cli_install` seam.
 fn cli_install_target() -> std::path::PathBuf {
-    std::path::PathBuf::from(format!(
-        "/usr/local/bin/{}",
-        crate::cli::installed_cli_name()
-    ))
+    crate::platform::cli_install::install_target(crate::cli::installed_cli_name())
 }
 
 /// Name of the compiled CLI binary produced by `cargo build --bin helmor-cli`.
+/// Windows appends the `.exe` extension that cargo emits.
 fn cli_source_binary_name() -> &'static str {
-    "helmor-cli"
+    if cfg!(windows) {
+        "helmor-cli.exe"
+    } else {
+        "helmor-cli"
+    }
 }
 
 fn bundled_cli_binary(app_exe: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
@@ -148,48 +174,22 @@ fn cli_install_remediation(cli_binary: &std::path::Path, install_path: &std::pat
 }
 
 fn shell_quote(path: &std::path::Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+    crate::platform::shell::quote_path(path)
 }
 
 fn shell_quote_arg(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+    crate::platform::shell::quote_posix_arg(value)
 }
 
 fn classify_cli_install(
     install_path: &std::path::Path,
     bundled_cli: &std::path::Path,
 ) -> CliInstallState {
-    let metadata = match std::fs::symlink_metadata(install_path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return CliInstallState::Missing;
-        }
-        Err(_) => return CliInstallState::Stale,
-    };
-
-    if !metadata.file_type().is_symlink() {
-        return CliInstallState::Stale;
-    }
-
-    let target = match std::fs::read_link(install_path) {
-        Ok(target) => target,
-        Err(_) => return CliInstallState::Stale,
-    };
-    let resolved_target = if target.is_absolute() {
-        target
-    } else {
-        install_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("/"))
-            .join(target)
-    };
-
-    match (
-        std::fs::canonicalize(resolved_target),
-        std::fs::canonicalize(bundled_cli),
-    ) {
-        (Ok(installed), Ok(expected)) if installed == expected => CliInstallState::Managed,
-        _ => CliInstallState::Stale,
+    use crate::platform::cli_install::ManagedCliStatus;
+    match crate::platform::cli_install::classify(install_path, bundled_cli) {
+        ManagedCliStatus::Managed => CliInstallState::Managed,
+        ManagedCliStatus::Stale => CliInstallState::Stale,
+        ManagedCliStatus::Missing => CliInstallState::Missing,
     }
 }
 
@@ -204,6 +204,63 @@ fn cli_status_for_paths(
             .then(|| install_path.display().to_string()),
         build_mode: crate::data_dir::data_mode_label().to_string(),
         install_state,
+    }
+}
+
+/// Startup self-heal for the managed CLI launcher. If `/usr/local/bin/helmor`
+/// exists but resolves to a DIFFERENT Helmor install (pre-update app path,
+/// moved bundle), re-link it to this app's CLI so the launcher always matches
+/// the running app version. Conservative on purpose:
+/// - `Missing` is left alone — the user never opted into the CLI.
+/// - A stale entry is only adopted when it already points at a Helmor CLI
+///   binary; a user's own same-named tool is never clobbered.
+/// - Never elevates: a permission failure logs and leaves Settings → CLI
+///   install as the explicit (elevating) repair path.
+/// - No-op in dev builds, which must not steal the production link.
+pub fn ensure_cli_install_current() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let Ok(app_exe) = std::env::current_exe() else {
+        return;
+    };
+    let Ok(bundled_cli) = bundled_cli_binary(&app_exe) else {
+        return;
+    };
+    if !bundled_cli.is_file() {
+        return;
+    }
+    let install_path = cli_install_target();
+    use crate::platform::cli_install::ManagedCliStatus;
+    if crate::platform::cli_install::classify(&install_path, &bundled_cli)
+        != ManagedCliStatus::Stale
+    {
+        return;
+    }
+    let points_at_helmor_cli = std::fs::read_link(&install_path)
+        .map(|target| {
+            target
+                .file_name()
+                .map(|name| name == std::ffi::OsStr::new(cli_source_binary_name()))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if !points_at_helmor_cli {
+        return;
+    }
+    match try_install_symlink_unprivileged(&bundled_cli, &install_path) {
+        Ok(()) => {
+            tracing::info!(
+                install_path = %install_path.display(),
+                "CLI launcher pointed at an old install; re-linked to this app"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "CLI launcher is stale but auto-repair failed; reinstall from Settings"
+            );
+        }
     }
 }
 
@@ -281,18 +338,9 @@ fn try_install_symlink_unprivileged(
         }
     }
 
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(bundled_cli, install_path)
-            .with_context(|| format!("Failed to install CLI at {}", install_path.display()))?;
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = bundled_cli;
-        anyhow::bail!("CLI installation via symlink is only supported on Unix.")
-    }
+    crate::platform::cli_install::create_managed_link(bundled_cli, install_path)
+        .with_context(|| format!("Failed to install CLI at {}", install_path.display()))?;
+    Ok(())
 }
 
 fn is_permission_denied(error: &anyhow::Error) -> bool {
@@ -357,6 +405,7 @@ fn build_elevated_install_script(
 
 /// Quote a path so it survives both `do shell script "..."` (AppleScript string
 /// literal) and the shell that AppleScript hands the script to.
+#[cfg(target_os = "macos")]
 fn applescript_shell_arg(path: &std::path::Path) -> String {
     let raw = path.display().to_string();
     // 1. Single-quote for the shell, escaping embedded single quotes via `'\''`.
@@ -366,9 +415,7 @@ fn applescript_shell_arg(path: &std::path::Path) -> String {
 }
 
 fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
+    crate::platform::paths::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn claude_skills_dir() -> PathBuf {
@@ -418,6 +465,17 @@ fn helmor_skills_install_args(agents: &[&str]) -> Vec<String> {
     args
 }
 
+/// A `Command` that runs `npx` cross-platform. `resolve_for_spawn` finds the
+/// real executable (on Windows `npx` is a `.cmd`/`.ps1` shim that
+/// `CreateProcess` can't resolve from the bare name), and
+/// `configure_background_cli` keeps it from flashing a console window — this
+/// runs during the silent startup check.
+fn npx_command() -> Command {
+    let mut cmd = Command::new(crate::platform::executable::resolve_for_spawn("npx"));
+    crate::platform::process::configure_background_cli(&mut cmd);
+    cmd
+}
+
 fn helmor_skills_install_command(agents: &[&str]) -> String {
     let command_agents = if agents.is_empty() {
         vec!["claude-code", "codex"]
@@ -437,6 +495,9 @@ fn helmor_skills_status() -> anyhow::Result<HelmorSkillsStatus> {
             claude: claude_login_ready(),
             codex: codex_auth_status().ready,
             cursor: cursor_login_ready(),
+            // opencode/mimo readiness comes from the login-status path, not here.
+            opencode: false,
+            mimo: false,
             codex_provider: None,
             codex_auth_method: None,
         },
@@ -576,6 +637,9 @@ pub async fn install_helmor_skills() -> CmdResult<HelmorSkillsStatus> {
             claude: claude_login_ready(),
             codex: codex_auth_status().ready,
             cursor: cursor_login_ready(),
+            // opencode/mimo readiness comes from the login-status path, not here.
+            opencode: false,
+            mimo: false,
             codex_provider: None,
             codex_auth_method: None,
         };
@@ -589,7 +653,7 @@ pub async fn install_helmor_skills() -> CmdResult<HelmorSkillsStatus> {
             );
         }
 
-        let output = Command::new("npx")
+        let output = npx_command()
             .args(helmor_skills_install_args(&agents))
             .output()
             .with_context(|| format!("Failed to start skills installer. Try:\n  {command}"))?;
@@ -707,11 +771,32 @@ fn try_install_cli_silent_at(
     }
 }
 
-fn try_install_cli_silent() -> anyhow::Result<()> {
-    let source = std::env::current_exe().context("Cannot determine app executable path")?;
-    let cli_binary = bundled_cli_binary(&source)?;
-    let install_path = cli_install_target();
-    try_install_cli_silent_at(&cli_binary, &install_path)
+/// Verify the managed CLI symlink and silently re-point it if it is stale
+/// or missing. Returns the silent-install error (if any) for the panel.
+///
+/// This runs on EVERY components check — never gated by the per-version
+/// cache — because the symlink is cheap to fix (a stat + an unprivileged
+/// symlink rewrite) and can go stale WITHIN a single version whenever the
+/// dev build switches worktrees. Caching it behind the version key is
+/// exactly what used to leave a dangling `/usr/local/bin/helmor-dev`
+/// pointing at a worktree whose binary was rebuilt or removed.
+fn check_and_heal_cli_symlink(
+    install_path: &std::path::Path,
+    bundled_cli: &std::path::Path,
+) -> Option<String> {
+    match classify_cli_install(install_path, bundled_cli) {
+        CliInstallState::Managed => None,
+        CliInstallState::Missing | CliInstallState::Stale => {
+            match try_install_cli_silent_at(bundled_cli, install_path) {
+                Ok(()) => None,
+                Err(error) => {
+                    let msg = format!("{error:#}");
+                    tracing::info!(error = %msg, "Components check: silent CLI install deferred to user");
+                    Some(msg)
+                }
+            }
+        }
+    }
 }
 
 /// One pass of the silent startup check. Returns the post-check snapshot
@@ -720,55 +805,37 @@ fn try_install_cli_silent() -> anyhow::Result<()> {
 fn run_components_check_inner(force: bool) -> ComponentsUpdateCheck {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
 
-    // Cache hit — skip everything. The panel still re-reads errors so
-    // a "Re-check" that clears the cache key (via `force`) shows fresh.
+    // --- CLI half: ALWAYS run, BEFORE the per-version cache gate ---------
+    // Self-heal the managed CLI symlink on every launch (see
+    // `check_and_heal_cli_symlink`): it can go stale within a single
+    // version when the dev build switches worktrees, and re-pointing it is
+    // cheap and (on a user-writable install dir) needs no sudo, so a plain
+    // restart fixes it instead of forcing a manual `ln -sfn`.
+    let install_path = cli_install_target();
+    let cli_error: Option<String> = match std::env::current_exe()
+        .context("Cannot determine app executable path")
+        .and_then(|exe| bundled_cli_binary(&exe))
+    {
+        Ok(cli_binary) => check_and_heal_cli_symlink(&install_path, &cli_binary),
+        Err(error) => {
+            tracing::warn!(error = %format!("{error:#}"), "Components check: bundled CLI lookup failed");
+            None
+        }
+    };
+    persist_error(UPDATE_CHECK_CLI_ERROR_KEY, cli_error.as_deref());
+
+    // --- Skills install is expensive (`npx skills add`): gate it behind
+    // the per-version cache. The CLI half above is independent of this.
     if !force {
         if let Ok(Some(last)) =
             crate::models::settings::load_setting_value(LAST_UPDATE_CHECK_VERSION_KEY)
         {
             if last == current_version {
-                return read_components_update_check().unwrap_or_else(|error| {
-                    tracing::warn!(
-                        error = %format!("{error:#}"),
-                        "Failed to read components-check cache; returning empty snapshot",
-                    );
-                    empty_components_check(current_version.clone())
-                });
+                return read_components_update_check()
+                    .unwrap_or_else(|_| empty_components_check(current_version));
             }
         }
     }
-
-    // --- CLI half --------------------------------------------------------
-    let install_path = cli_install_target();
-    let source = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(error) => {
-            tracing::warn!(error = %error, "Components check: current_exe failed");
-            return read_components_update_check()
-                .unwrap_or_else(|_| empty_components_check(current_version));
-        }
-    };
-    let cli_binary = match bundled_cli_binary(&source) {
-        Ok(path) => path,
-        Err(error) => {
-            tracing::warn!(error = %format!("{error:#}"), "Components check: bundled CLI lookup failed");
-            return read_components_update_check()
-                .unwrap_or_else(|_| empty_components_check(current_version));
-        }
-    };
-
-    let cli_state = classify_cli_install(&install_path, &cli_binary);
-    let cli_error: Option<String> = match cli_state {
-        CliInstallState::Managed => None,
-        CliInstallState::Missing | CliInstallState::Stale => match try_install_cli_silent() {
-            Ok(()) => None,
-            Err(error) => {
-                let msg = format!("{error:#}");
-                tracing::info!(error = %msg, "Components check: silent CLI install deferred to user");
-                Some(msg)
-            }
-        },
-    };
 
     // --- Skills half -----------------------------------------------------
     //
@@ -778,6 +845,8 @@ fn run_components_check_inner(force: bool) -> ComponentsUpdateCheck {
         claude: claude_login_ready(),
         codex: codex_auth_status().ready,
         cursor: cursor_login_ready(),
+        opencode: false,
+        mimo: false,
         codex_provider: None,
         codex_auth_method: None,
     };
@@ -795,17 +864,13 @@ fn run_components_check_inner(force: bool) -> ComponentsUpdateCheck {
             }
         }
     };
-
-    // Persist error state unconditionally so the panel reflects reality.
-    persist_error(UPDATE_CHECK_CLI_ERROR_KEY, cli_error.as_deref());
     persist_error(UPDATE_CHECK_SKILLS_ERROR_KEY, skills_error.as_deref());
 
-    // Only advance the cache key if neither half left a real error
-    // behind. This way a transient skills failure (no network, npx not
-    // on PATH yet) auto-retries on the next launch, while a steady
-    // state ("CLI needs sudo, you have to click Retry") still only
-    // checks once per upgrade.
-    if cli_error.is_none() && skills_error.is_none() {
+    // Advance the cache key (which gates the expensive skills install) only
+    // when the skills half is clean — a transient failure (no network, npx
+    // not on PATH yet) auto-retries on the next launch. The CLI half is
+    // independent and always runs, so it no longer gates this key.
+    if skills_error.is_none() {
         if let Err(error) = crate::models::settings::upsert_setting_value(
             LAST_UPDATE_CHECK_VERSION_KEY,
             &current_version,
@@ -822,7 +887,7 @@ fn run_components_check_inner(force: bool) -> ComponentsUpdateCheck {
 
 fn install_skills_silent(agents: &[&str]) -> anyhow::Result<()> {
     let command = helmor_skills_install_command(agents);
-    let output = Command::new("npx")
+    let output = npx_command()
         .args(helmor_skills_install_args(agents))
         .output()
         .with_context(|| format!("Failed to start skills installer. Try:\n  {command}"))?;
@@ -968,6 +1033,103 @@ pub fn exit_onboarding_window_mode(window: Window) -> CmdResult<()> {
     Ok(())
 }
 
+#[tauri::command]
+pub fn enter_mini_window_mode(window: Window) -> CmdResult<()> {
+    let label = window.label().to_string();
+    let restore_state = MiniWindowRestoreState {
+        size: window
+            .outer_size()
+            .context("Failed to read current window size")?,
+        resizable: window
+            .is_resizable()
+            .context("Failed to read window resizable state")?,
+    };
+    MINI_WINDOW_STATE
+        .lock()
+        .expect("mini window state mutex poisoned")
+        .entry(label)
+        .or_insert(restore_state);
+
+    let size = mini_window_size();
+    window
+        .set_size(size)
+        .context("Failed to set mini window size")?;
+    window.center().context("Failed to center mini window")?;
+    window
+        .set_min_size(Some(size))
+        .context("Failed to set mini minimum window size")?;
+    window
+        .set_max_size(Some(size))
+        .context("Failed to set mini maximum window size")?;
+    window
+        .set_size_constraints(mini_window_constraints())
+        .context("Failed to set mini window size constraints")?;
+    window
+        .set_resizable(false)
+        .context("Failed to disable mini window resizing")?;
+    // Resizing/centering drops the webview's keyboard focus on macOS, which
+    // kills the JS keydown listener until the user clicks back in. Re-focus
+    // so the toggle shortcut keeps working without a manual click.
+    let _ = window.set_focus();
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn exit_mini_window_mode(window: Window) -> CmdResult<()> {
+    let label = window.label().to_string();
+    let restore_state = MINI_WINDOW_STATE
+        .lock()
+        .expect("mini window state mutex poisoned")
+        .remove(&label);
+
+    window
+        .set_size_constraints(WindowSizeConstraints::default())
+        .context("Failed to clear mini window size constraints")?;
+    window
+        .set_min_size(None::<Size>)
+        .context("Failed to clear mini minimum window size")?;
+    window
+        .set_max_size(None::<Size>)
+        .context("Failed to clear mini maximum window size")?;
+
+    if let Some(state) = restore_state {
+        window
+            .set_size(Size::Physical(state.size))
+            .context("Failed to restore window size")?;
+        center_window_for_size(&window, state.size).context("Failed to center restored window")?;
+        window
+            .set_resizable(state.resizable)
+            .context("Failed to restore window resizing")?;
+    } else {
+        window
+            .set_resizable(true)
+            .context("Failed to restore window resizing")?;
+    }
+    // See enter_mini_window_mode: restore keyboard focus after resizing so the
+    // toggle shortcut stays live.
+    let _ = window.set_focus();
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn toggle_mini_window_mode(window: Window) -> CmdResult<bool> {
+    let label = window.label().to_string();
+    let is_mini = MINI_WINDOW_STATE
+        .lock()
+        .expect("mini window state mutex poisoned")
+        .contains_key(&label);
+
+    if is_mini {
+        exit_mini_window_mode(window)?;
+        Ok(false)
+    } else {
+        enter_mini_window_mode(window)?;
+        Ok(true)
+    }
+}
+
 fn onboarding_window_size() -> Size {
     Size::Logical(LogicalSize {
         width: ONBOARDING_WINDOW_WIDTH,
@@ -992,6 +1154,43 @@ fn onboarding_window_constraints() -> WindowSizeConstraints {
     }
 }
 
+fn mini_window_size() -> Size {
+    Size::Logical(LogicalSize {
+        width: MINI_WINDOW_WIDTH,
+        height: MINI_WINDOW_HEIGHT,
+    })
+}
+
+fn mini_window_constraints() -> WindowSizeConstraints {
+    WindowSizeConstraints {
+        min_width: Some(PixelUnit::Logical(LogicalUnit::new(MINI_WINDOW_WIDTH))),
+        min_height: Some(PixelUnit::Logical(LogicalUnit::new(MINI_WINDOW_HEIGHT))),
+        max_width: Some(PixelUnit::Logical(LogicalUnit::new(MINI_WINDOW_WIDTH))),
+        max_height: Some(PixelUnit::Logical(LogicalUnit::new(MINI_WINDOW_HEIGHT))),
+    }
+}
+
+fn center_window_for_size(window: &Window, size: PhysicalSize<u32>) -> anyhow::Result<()> {
+    let Some(monitor) = window
+        .current_monitor()
+        .context("Failed to read current monitor")?
+    else {
+        window.center().context("Failed to center window")?;
+        return Ok(());
+    };
+
+    let monitor_position = *monitor.position();
+    let monitor_size = *monitor.size();
+    let x = monitor_position.x + ((monitor_size.width as i32 - size.width as i32) / 2);
+    let y = monitor_position.y + ((monitor_size.height as i32 - size.height as i32) / 2);
+
+    window
+        .set_position(Position::Physical(PhysicalPosition::new(x, y)))
+        .context("Failed to set centered window position")?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn open_agent_login_terminal(provider: String) -> CmdResult<()> {
     run_blocking(move || open_agent_login_terminal_impl(&provider)).await
@@ -1005,11 +1204,60 @@ pub async fn get_agent_login_status() -> CmdResult<AgentLoginStatus> {
             claude: claude_login_ready(),
             codex: codex.ready,
             cursor: cursor_login_ready(),
+            opencode: opencode_login_ready(),
+            mimo: mimo_login_ready(),
             codex_provider: codex.provider,
             codex_auth_method: codex.auth_method.map(str::to_string),
         })
     })
     .await
+}
+
+#[tauri::command]
+pub async fn get_agent_versions() -> CmdResult<AgentVersions> {
+    run_blocking(|| {
+        Ok(AgentVersions {
+            claude: agent_cli_version("claude"),
+            codex: agent_cli_version("codex"),
+            opencode: agent_cli_version("opencode"),
+            mimo: agent_cli_version("mimo"),
+        })
+    })
+    .await
+}
+
+fn agent_cli_version(provider: &str) -> Option<String> {
+    let mut command = std::process::Command::new(resolve_agent_binary(provider));
+    crate::platform::process::configure_background_cli(&mut command);
+    let output = command.arg("--version").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_semver(&text)
+}
+
+// Extract the first `MAJOR.MINOR.PATCH(-suffix)?` token; CLI `--version` layouts vary.
+fn parse_semver(text: &str) -> Option<String> {
+    for token in text.split(|c: char| c.is_whitespace() || c == '(' || c == ')') {
+        let trimmed = token.trim_start_matches('v');
+        let mut dots = 0;
+        let valid = !trimmed.is_empty()
+            && trimmed.chars().all(|c| {
+                if c == '.' {
+                    dots += 1;
+                    true
+                } else {
+                    c.is_ascii_digit() || c == '-' || c.is_ascii_alphabetic()
+                }
+            })
+            && dots >= 2
+            && trimmed.chars().next().is_some_and(|c| c.is_ascii_digit());
+        if valid {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }
 
 /// Cursor "ready" = non-empty `app.cursor_provider.apiKey`.
@@ -1044,16 +1292,51 @@ fn resolve_agent_binary(provider: &str) -> PathBuf {
     let bundled_path = match provider {
         "claude" => bundled.claude_bin,
         "codex" => bundled.codex_bin,
+        "opencode" => bundled.opencode_bin,
+        "mimo" => bundled.mimo_bin,
         _ => None,
     };
-    bundled_path.unwrap_or_else(|| PathBuf::from(provider))
+    bundled_path.unwrap_or_else(|| crate::platform::executable::resolve_for_spawn(provider))
+}
+
+// Read from the sidecar-computed settings row, NOT `auth.json` (which misses env/config/Zen providers).
+fn opencode_login_ready() -> bool {
+    slug_login_ready("app.opencode_provider")
+}
+
+fn mimo_login_ready() -> bool {
+    slug_login_ready("app.mimo_provider")
+}
+
+fn slug_login_ready(setting_key: &str) -> bool {
+    let raw = match crate::models::settings::load_setting_value(setting_key) {
+        Ok(Some(value)) => value,
+        Ok(None) => return false,
+        Err(error) => {
+            tracing::debug!("Failed to read {setting_key}: {error}");
+            return false;
+        }
+    };
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let status_ready = parsed
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .map(|status| status == "ready")
+        .unwrap_or(false);
+    let connected_nonempty = parsed
+        .get("connected")
+        .and_then(serde_json::Value::as_array)
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false);
+    status_ready || connected_nonempty
 }
 
 fn claude_login_ready() -> bool {
-    match std::process::Command::new(resolve_agent_binary("claude"))
-        .args(["auth", "status"])
-        .output()
-    {
+    let mut command = std::process::Command::new(resolve_agent_binary("claude"));
+    crate::platform::process::configure_background_cli(&mut command);
+    match command.args(["auth", "status"]).output() {
         Ok(output) if output.status.success() => parse_claude_login_status(&output.stdout),
         Ok(output) => {
             // Claude exits non-zero when the user isn't authenticated —
@@ -1104,10 +1387,9 @@ fn codex_auth_status() -> CodexAuthStatus {
 }
 
 fn codex_login_ready() -> bool {
-    match std::process::Command::new(resolve_agent_binary("codex"))
-        .args(["login", "status"])
-        .output()
-    {
+    let mut command = std::process::Command::new(resolve_agent_binary("codex"));
+    crate::platform::process::configure_background_cli(&mut command);
+    match command.args(["login", "status"]).output() {
         Ok(output) if output.status.success() => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1161,6 +1443,8 @@ fn agent_login_command(provider: &str) -> anyhow::Result<String> {
     let args = match provider {
         "claude" => "auth login",
         "codex" => "login",
+        "opencode" => "auth login",
+        "mimo" => "auth login",
         _ => anyhow::bail!("Unknown agent provider: {provider}"),
     };
     // Quote the resolved binary path so spaces in `Helmor.app` survive
@@ -1205,15 +1489,9 @@ pub async fn spawn_agent_login_terminal(
         let _ = window.set_focus();
     }
 
-    let working_dir = std::env::var("HOME")
-        .ok()
-        .filter(|home| !home.trim().is_empty())
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|path| path.display().to_string())
-        })
-        .unwrap_or_else(|| "/".to_string());
+    let working_dir = crate::platform::paths::home_dir_or_current_or_root()
+        .display()
+        .to_string();
     let context = ScriptContext {
         root_path: working_dir.clone(),
         workspace_path: None,
@@ -1231,11 +1509,12 @@ pub async fn spawn_agent_login_terminal(
             instance_id = %instance_id,
             "spawn_agent_login_terminal: entering run_terminal_session"
         );
-        // Auto-type the login command via the run_terminal_session boot
+        // Auto-type the login command via the run_terminal_session boot input,
+        // in the active shell's syntax (PowerShell needs the call operator).
         // input — written synchronously to the PTY master right after
         // the shell registers, so a frontend re-render-driven
         // cleanup→respawn can't drop the bytes.
-        let boot_input = format!("{command}; exit\n");
+        let boot_input = crate::platform::shell::boot_input(&command);
         if let Err(error) = crate::workspace::scripts::run_terminal_session(
             &mgr,
             AGENT_LOGIN_REPO_ID,
@@ -1245,6 +1524,7 @@ pub async fn spawn_agent_login_terminal(
             &context,
             channel.clone(),
             Some(&boot_input),
+            None,
         ) {
             tracing::warn!(
                 provider = %provider,
@@ -1551,6 +1831,7 @@ fn copy_image_file_to_clipboard(_path: &std::path::Path) -> anyhow::Result<()> {
     anyhow::bail!("Copying images is only supported on macOS")
 }
 
+#[cfg(target_os = "macos")]
 fn applescript_escape(input: &str) -> String {
     input.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -1572,7 +1853,13 @@ fn base64_decode(input: &str) -> anyhow::Result<Vec<u8>> {
 #[tauri::command]
 pub async fn request_quit(app: tauri::AppHandle, force: bool) {
     tracing::info!(force, "request_quit invoked from frontend");
+    cleanup_before_exit(&app, force);
 
+    // Done: terminate the process.
+    app.exit(0);
+}
+
+pub fn cleanup_before_exit(app: &tauri::AppHandle, force: bool) {
     // 1. Stop filesystem watchers so no new events arrive.
     app.state::<git_watcher::GitWatcherManager>().shutdown();
 
@@ -1594,29 +1881,47 @@ pub async fn request_quit(app: tauri::AppHandle, force: bool) {
     //    Helmor itself spawned. Each handle's owning `run_script` thread
     //    reaps its own `Child`, so we just need to deliver the signal.
     let scripts = app.state::<ScriptProcessManager>();
-    let signaled = scripts.kill_all();
+    let kill_attempts = scripts.kill_all();
+
+    // Belt-and-suspenders: stamp only rows for processes we just proved gone.
+    // The per-process `record_ended` calls in `run_script_with_shell` cover
+    // the common case; this catches handles that did not make it through their
+    // reaper before app exit. Prior maybe-alive stale rows must remain open so
+    // the next launch can keep reporting them.
+    let confirmed_gone: Vec<_> = kill_attempts
+        .iter()
+        .filter(|attempt| attempt.gone)
+        .map(
+            |attempt| crate::workspace::runtime_registry::RuntimeProcessIdentity {
+                repo_id: attempt.repo_id.clone(),
+                workspace_id: attempt.workspace_id.clone(),
+                script_type: attempt.script_type.clone(),
+                pid: attempt.pid,
+                pgid: attempt.pgid,
+            },
+        )
+        .collect();
+
+    let signaled = kill_attempts.len();
     if signaled > 0 {
+        let timed_out = signaled.saturating_sub(confirmed_gone.len());
         tracing::info!(
             signaled,
+            confirmed_gone = confirmed_gone.len(),
+            timed_out,
             "request_quit: signaled live script/terminal handles"
         );
     }
 
-    // Belt-and-suspenders: stamp every still-open runtime registry
-    // row as ended, so the next launch's classification sweep
-    // doesn't waste cycles probing PIDs we've already terminated.
-    // The per-process `record_ended` calls in `run_script_with_shell`
-    // cover the common case; this catches handles that didn't make
-    // it through their reaper before app exit.
-    match crate::workspace::runtime_registry::record_all_ended() {
+    match crate::workspace::runtime_registry::record_processes_ended(&confirmed_gone) {
         Ok(0) => {}
         Ok(stamped) => tracing::debug!(
             stamped,
-            "request_quit: stamped runtime registry rows as ended"
+            "request_quit: stamped confirmed runtime registry rows as ended"
         ),
         Err(error) => tracing::warn!(
             %error,
-            "request_quit: failed to stamp runtime registry rows ended; \
+            "request_quit: failed to stamp confirmed runtime registry rows ended; \
              next launch's sweep will reclassify"
         ),
     }
@@ -1635,9 +1940,6 @@ pub async fn request_quit(app: tauri::AppHandle, force: bool) {
         )
     };
     sidecar.shutdown(cooperative, escalation);
-
-    // 5. Done — terminate the process.
-    app.exit(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1760,6 +2062,26 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn parse_semver_extracts_version_from_varied_cli_output() {
+        assert_eq!(
+            parse_semver("2.1.154 (Claude Code)").as_deref(),
+            Some("2.1.154")
+        );
+        assert_eq!(
+            parse_semver("codex-cli 0.137.0").as_deref(),
+            Some("0.137.0")
+        );
+        assert_eq!(parse_semver("1.16.2\n").as_deref(), Some("1.16.2"));
+        assert_eq!(parse_semver("v3.4.5").as_deref(), Some("3.4.5"));
+        assert_eq!(
+            parse_semver("1.2.3-beta.1").as_deref(),
+            Some("1.2.3-beta.1")
+        );
+        assert_eq!(parse_semver("opencode cli"), None);
+        assert_eq!(parse_semver("version 1.2"), None);
+    }
+
+    #[test]
     fn classify_cli_install_reports_missing_when_path_absent() {
         let tmp = tempdir().unwrap();
         let bundled_cli = tmp.path().join("Helmor.app/Contents/MacOS/helmor-cli");
@@ -1773,6 +2095,28 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn classify_cli_install_reports_managed_for_matching_shim() {
+        let tmp = tempdir().unwrap();
+        let bundled_cli = tmp.path().join("Helmor/helmor-cli.exe");
+        let install_path = tmp.path().join("bin/helmor.cmd");
+        fs::create_dir_all(bundled_cli.parent().unwrap()).unwrap();
+        fs::create_dir_all(install_path.parent().unwrap()).unwrap();
+        fs::write(&bundled_cli, "").unwrap();
+        fs::write(
+            &install_path,
+            format!("@echo off\r\n\"{}\" %*\r\n", bundled_cli.display()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            classify_cli_install(&install_path, &bundled_cli),
+            CliInstallState::Managed
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn classify_cli_install_reports_managed_for_matching_symlink() {
         let tmp = tempdir().unwrap();
@@ -1805,6 +2149,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn install_cli_symlink_replaces_stale_copy_with_managed_symlink() {
         let tmp = tempdir().unwrap();
@@ -1817,6 +2162,40 @@ mod tests {
 
         install_cli_symlink(&bundled_cli, &install_path).unwrap();
 
+        assert_eq!(
+            classify_cli_install(&install_path, &bundled_cli),
+            CliInstallState::Managed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_and_heal_cli_symlink_repoints_a_stale_link() {
+        let tmp = tempdir().unwrap();
+        let bundled_cli = tmp.path().join("Helmor.app/Contents/MacOS/helmor-cli");
+        let old_cli = tmp.path().join("old-worktree/helmor-cli");
+        let install_path = tmp.path().join("usr/local/bin/helmor-dev");
+        fs::create_dir_all(bundled_cli.parent().unwrap()).unwrap();
+        fs::create_dir_all(old_cli.parent().unwrap()).unwrap();
+        fs::create_dir_all(install_path.parent().unwrap()).unwrap();
+        fs::write(&bundled_cli, "#!/bin/sh\n").unwrap();
+        fs::write(&old_cli, "#!/bin/sh\n").unwrap();
+
+        // Reproduce the dev-CLI breakage: the managed symlink points at a
+        // different worktree's binary, so it reads as Stale.
+        std::os::unix::fs::symlink(&old_cli, &install_path).unwrap();
+        assert_eq!(
+            classify_cli_install(&install_path, &bundled_cli),
+            CliInstallState::Stale
+        );
+
+        // The plain (un-forced) heal a restart triggers re-points it with no
+        // error and no sudo — the whole point of moving this out of the
+        // per-version cache gate.
+        assert_eq!(
+            check_and_heal_cli_symlink(&install_path, &bundled_cli),
+            None
+        );
         assert_eq!(
             classify_cli_install(&install_path, &bundled_cli),
             CliInstallState::Managed
@@ -1836,6 +2215,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn applescript_shell_arg_quotes_plain_path() {
         assert_eq!(
@@ -1844,6 +2224,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn applescript_shell_arg_escapes_single_quote_for_shell_then_applescript() {
         // Shell-quote turns `'` into `'\''`; the embedded backslash then needs
@@ -1854,6 +2235,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn applescript_shell_arg_escapes_double_quote_and_backslash() {
         assert_eq!(
@@ -1942,6 +2324,11 @@ mod tests {
         );
     }
 
+    // macOS-only: exercises the `/usr/local/bin` sudo-elevation install path and
+    // asserts the macOS "administrator access / Retry" message. Windows installs
+    // a `.cmd` shim under %LOCALAPPDATA% with no elevation flow, so this scenario
+    // doesn't apply there.
+    #[cfg(target_os = "macos")]
     #[test]
     fn try_install_cli_silent_at_bails_with_friendly_message_on_permission_denied() {
         // Pick a parent that almost certainly isn't writable to the test

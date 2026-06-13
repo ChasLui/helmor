@@ -2,6 +2,185 @@
 	"_readme": "AUTO-GENERATED from .announcements during `bun run release:version`. Each item is one released version's in-app announcement. Do not edit released entries by hand.",
 	"items": [
 		{
+			"releaseVersion": "0.38.0",
+			"items": [
+				{
+					"text": "MiMo Code (Xiaomi's MiMo-Code) is now a built-in agent — sign in and run it alongside Claude, Codex, OpenCode, and Cursor.",
+					"action": {
+						"label": "Open Providers",
+						"value": {
+							"type": "openSettings",
+							"section": "providers"
+						}
+					}
+				},
+				{
+					"text": "Switching a conversation to the terminal now picks up where you left off — it resumes the same Claude or Codex session in the TUI instead of starting fresh."
+				}
+			]
+		},
+		{
+			"releaseVersion": "0.37.0",
+			"items": [
+				{
+					"text": "New chats can now inject selected previous sessions as context, so agents can continue work without pasting full transcripts."
+				},
+				{
+					"text": "🎨 We polished the interface across the composer, tabs, shortcuts, and empty states."
+				}
+			]
+		},
+		{
+			"releaseVersion": "0.36.0",
+			"items": [
+				{
+					"text": "URLs in terminal output are now clickable — ⌘+click a link in the Terminal, Run, or Setup panels to open it in your browser."
+				}
+			]
+		},
+		{
+			"releaseVersion": "0.35.0",
+			"items": [
+				{
+					"text": "⚡ Faster again — switching workspaces is now snappier and smoother."
+				},
+				{
+					"text": "Large pastes now stay as tags after sending — hover one to preview its full content."
+				},
+				{
+					"text": "Long messages now collapse to 20 lines — Show more expands them in place without losing your spot."
+				},
+				{
+					"text": "Quick panel: press ⇧⌥Space anywhere to spin up a task in a small floating window — pick a repo, send the prompt, and keep chatting without opening Helmor. Hotkey configurable in Settings → Shortcuts.",
+					"action": {
+						"label": "Try it",
+						"value": {
+							"type": "toggleQuickPanel"
+						}
+					}
+				},
+				{
+					"text": "New: Terminal Mode — run your prompt in the agent's own terminal UI (⌘⇧T).",
+					"action": {
+						"label": "Open General",
+						"value": {
+							"type": "openSettings",
+							"section": "general"
+						}
+					}
+				}
+			]
+		},
+		{
+			"releaseVersion": "0.34.0",
+			"items": [
+				{
+					"text": "You can now clean up all archived workspaces at once from Settings → General to free up disk space.",
+					"action": {
+						"label": "Open General",
+						"value": {
+							"type": "openSettings",
+							"section": "general"
+						}
+					}
+				},
+				{
+					"text": "Claude Fable 5 (1M context) is now available at the top of the Claude Code model list — Anthropic's most capable model for the hardest, longest-running tasks. Opus 4.8 remains the default."
+				},
+				{
+					"text": "⚡ Major performance improvements across the app."
+				}
+			]
+		},
+		{
+			"releaseVersion": "0.33.0",
+			"items": [
+				{
+					"text": "Cursor now supports Plan mode — it drafts a read-only plan first, then lets you approve it or request changes before it touches your code."
+				}
+			]
+		},
+		{
+			"releaseVersion": "0.32.0",
+			"items": [
+				{
+					"text": "OpenCode is now a built-in coding agent — start a session and pick from any model it can reach, then connect your own providers in Settings.",
+					"action": {
+						"label": "Open Providers",
+						"value": {
+							"type": "openSettings",
+							"section": "providers"
+						}
+					}
+				}
+			]
+		},
+		{
+			"releaseVersion": "0.31.0",
+			"items": [
+				{
+					"text": "Open Helmor from your phone or any browser — pair a device once, then drive your desktop's workspaces and agents from a stable URL.",
+					"action": {
+						"label": "Open Mobile companion",
+						"value": {
+							"type": "openSettings",
+							"section": "experimental"
+						}
+					}
+				},
+				{
+					"text": "You can now build stacked PRs — a chain of small, dependent PRs. Plan one with /helmor-cli stack, or split a change you've already written with /helmor-cli break; the sidebar groups each stack together."
+				}
+			]
+		},
+		{
+			"releaseVersion": "0.30.0",
+			"items": [
+				{
+					"text": "Agents now keep research notes and other scratch artifacts out of workspace Changes."
+				},
+				{
+					"text": "Gemma 4 12B is now available in the Local LLM installer.",
+					"action": {
+						"label": "Open Experimental",
+						"value": {
+							"type": "openSettings",
+							"section": "experimental"
+						}
+					}
+				},
+				{
+					"text": "On macOS, closing the window (or Cmd+Shift+W) now keeps Helmor running in the Dock instead of quitting — click the Dock icon to bring it back. Cmd+Q still quits.",
+					"action": {
+						"label": "Open Shortcuts",
+						"value": {
+							"type": "openSettings",
+							"section": "shortcuts"
+						}
+					}
+				},
+				{
+					"text": "Use Command+Control+M or the header resize button to switch Helmor between desktop and mini window sizes."
+				},
+				{
+					"text": "On narrow windows, the sidebars now peek in from the edges so the workspace stays full width."
+				},
+				{
+					"text": "Smart Triage now reasons more deeply before suggesting tasks, so its proposed tasks are more accurate.",
+					"action": {
+						"label": "Open Experimental",
+						"value": {
+							"type": "openSettings",
+							"section": "experimental"
+						}
+					}
+				},
+				{
+					"text": "Proposed tasks now show a source badge (GitHub, GitLab, Slack, or Lark) on their avatar, so you can see where each one came from at a glance."
+				}
+			]
+		},
+		{
 			"releaseVersion": "0.29.0",
 			"items": [
 				{
